@@ -74,6 +74,10 @@ import { WEB_PORT, SESSION_COOKIE_NAME } from './config.js';
 import { logger } from './logger.js';
 import { analyzeIntent } from './intent-analyzer.js';
 import { executeSessionReset } from './commands.js';
+import {
+  normalizeImageAttachments,
+  toAgentImages,
+} from './message-attachments.js';
 
 // --- App Setup ---
 
@@ -233,9 +237,17 @@ async function handleWebUserMessage(
 
   const messageId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
+  const normalizedAttachments = normalizeImageAttachments(attachments, {
+    onMimeMismatch: ({ declaredMime, detectedMime }) => {
+      logger.warn(
+        { chatJid, messageId, declaredMime, detectedMime },
+        'Web attachment MIME mismatch detected, using detected MIME',
+      );
+    },
+  });
   const attachmentsStr =
-    attachments && attachments.length > 0
-      ? JSON.stringify(attachments)
+    normalizedAttachments.length > 0
+      ? JSON.stringify(normalizedAttachments)
       : undefined;
   storeMessageDirect(
     messageId,
@@ -281,10 +293,7 @@ async function handleWebUserMessage(
     deps.queue.closeStdin(chatJid);
     deps.queue.enqueueMessageCheck(chatJid);
   } else {
-    const images = attachments?.map((attachment) => ({
-      data: attachment.data,
-      mimeType: attachment.mimeType,
-    }));
+    const images = toAgentImages(normalizedAttachments);
     const intent = analyzeIntent(content);
     const sendResult = deps.queue.sendMessage(
       chatJid,
@@ -340,9 +349,17 @@ async function handleAgentConversationMessage(
   // Store message with virtual chat_jid
   const messageId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
+  const normalizedAttachments = normalizeImageAttachments(attachments, {
+    onMimeMismatch: ({ declaredMime, detectedMime }) => {
+      logger.warn(
+        { chatJid, messageId, agentId, declaredMime, detectedMime },
+        'Agent conversation attachment MIME mismatch detected, using detected MIME',
+      );
+    },
+  });
   const attachmentsStr =
-    attachments && attachments.length > 0
-      ? JSON.stringify(attachments)
+    normalizedAttachments.length > 0
+      ? JSON.stringify(normalizedAttachments)
       : undefined;
 
   ensureChatExists(virtualChatJid);
@@ -391,10 +408,11 @@ async function handleAgentConversationMessage(
 
   // Try to pipe into running agent process
   const agentIntent = analyzeIntent(content);
+  const agentImages = toAgentImages(normalizedAttachments);
   const agentSendResult = deps.queue.sendMessage(
     virtualChatJid,
     formatted,
-    undefined,
+    agentImages,
     agentIntent,
   );
   if (agentSendResult === 'no_active') {

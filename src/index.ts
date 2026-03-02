@@ -53,7 +53,6 @@ import {
   setRegisteredGroup,
   setRouterState,
   setSession,
-  deleteAllSessionsForFolder,
   deleteSession,
   storeMessageDirect,
   updateChatName,
@@ -88,6 +87,7 @@ import { GroupQueue } from './group-queue.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { AgentStatus, MessageCursor, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { normalizeImageAttachments } from './message-attachments.js';
 import {
   startWebServer,
   broadcastToWebClients,
@@ -158,6 +158,48 @@ function sendSystemMessage(jid: string, type: string, detail: string): void {
     timestamp,
     is_from_me: true,
   });
+}
+
+function getSessionClaudeDir(folder: string, agentId?: string): string {
+  return agentId
+    ? path.join(DATA_DIR, 'sessions', folder, 'agents', agentId, '.claude')
+    : path.join(DATA_DIR, 'sessions', folder, '.claude');
+}
+
+async function clearSessionRuntimeFiles(folder: string, agentId?: string): Promise<void> {
+  const claudeDir = getSessionClaudeDir(folder, agentId);
+  if (!fs.existsSync(claudeDir)) return;
+
+  let cleared = false;
+  try {
+    for (const entry of fs.readdirSync(claudeDir)) {
+      if (entry === 'settings.json') continue;
+      fs.rmSync(path.join(claudeDir, entry), { recursive: true, force: true });
+    }
+    cleared = true;
+  } catch {
+    logger.info({ folder, agentId }, 'Direct session cleanup failed, trying Docker fallback');
+  }
+
+  if (!cleared) {
+    try {
+      await execFileAsync('docker', [
+        'run',
+        '--rm',
+        '-v',
+        `${claudeDir}:/target`,
+        CONTAINER_IMAGE,
+        'sh',
+        '-c',
+        'find /target -mindepth 1 -not -name settings.json -exec rm -rf {} + 2>/dev/null; exit 0',
+      ], { timeout: 15_000 });
+    } catch (err) {
+      logger.error(
+        { folder, agentId, err },
+        'Docker fallback cleanup failed',
+      );
+    }
+  }
 }
 
 /**
@@ -435,23 +477,22 @@ function formatMessages(messages: NewMessage[], isShared = false): string {
 function collectMessageImages(
   chatJid: string,
   messages: NewMessage[],
-): Array<{ data: string; mimeType?: string }> {
-  const images: Array<{ data: string; mimeType?: string }> = [];
+): Array<{ data: string; mimeType: string }> {
+  const images: Array<{ data: string; mimeType: string }> = [];
   for (const msg of messages) {
     if (!msg.attachments) continue;
     try {
       const parsed = JSON.parse(msg.attachments);
-      if (!Array.isArray(parsed)) continue;
-      for (const item of parsed) {
-        if (!item || typeof item !== 'object') continue;
-        if ((item as { type?: unknown }).type !== 'image') continue;
-        const data = (item as { data?: unknown }).data;
-        if (typeof data !== 'string' || data.length === 0) continue;
-        const maybeMime = (item as { mimeType?: unknown }).mimeType;
-        images.push({
-          data,
-          mimeType: typeof maybeMime === 'string' ? maybeMime : undefined,
-        });
+      const normalized = normalizeImageAttachments(parsed, {
+        onMimeMismatch: ({ declaredMime, detectedMime }) => {
+          logger.warn(
+            { chatJid, messageId: msg.id, declaredMime, detectedMime },
+            'Attachment MIME mismatch detected, using detected MIME',
+          );
+        },
+      });
+      for (const item of normalized) {
+        images.push({ data: item.data, mimeType: item.mimeType });
       }
     } catch (err) {
       logger.warn(
@@ -740,7 +781,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await setTyping(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
-  // 不可恢复的转录错误（如超大图片被固化在会话历史中）：无论是否已有回复，都必须重置会话
+  // 不可恢复的转录错误（如超大图片/MIME 错配被固化在会话历史中）：无论是否已有回复，都必须重置会话
   const errorForReset = [lastError, output.error].filter(Boolean).join(' ');
   if ((output.status === 'error' || hadError) && errorForReset.includes('unrecoverable_transcript:')) {
     const detail = (lastError || output.error || '').replace(/.*unrecoverable_transcript:\s*/, '');
@@ -750,34 +791,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     );
 
     // 清除会话文件（保留 settings.json）
-    // 容器创建的文件可能归属 node(1000)，先尝试直接删除，失败则用 Docker 清理
-    const claudeDir = path.join(DATA_DIR, 'sessions', group.folder, '.claude');
-    if (fs.existsSync(claudeDir)) {
-      let cleared = false;
-      try {
-        for (const entry of fs.readdirSync(claudeDir)) {
-          if (entry === 'settings.json') continue;
-          fs.rmSync(path.join(claudeDir, entry), { recursive: true, force: true });
-        }
-        cleared = true;
-      } catch {
-        logger.info({ folder: group.folder }, 'Direct cleanup failed, using Docker fallback');
-      }
-      if (!cleared) {
-        try {
-          await execFileAsync('docker', [
-            'run', '--rm', '-v', `${claudeDir}:/target`, CONTAINER_IMAGE,
-            'sh', '-c', 'find /target -mindepth 1 -not -name settings.json -exec rm -rf {} + 2>/dev/null; exit 0',
-          ], { timeout: 15_000 });
-        } catch (err) {
-          logger.error({ folder: group.folder, err }, 'Docker fallback cleanup also failed');
-        }
-      }
-    }
+    await clearSessionRuntimeFiles(group.folder);
 
-    // 清除 DB 和内存中的 session 记录
+    // 清除当前主会话（保留同 folder 下独立 agent 会话）
     try {
-      deleteAllSessionsForFolder(group.folder);
+      deleteSession(group.folder);
       delete sessions[group.folder];
     } catch (err) {
       logger.error({ folder: group.folder, err }, 'Failed to clear session state during auto-reset');
@@ -1751,6 +1769,8 @@ async function processAgentConversation(chatJid: string, agentId: string): Promi
   };
 
   let cursorCommitted = false;
+  let hadError = false;
+  let lastError = '';
   const lastProcessed = missedMessages[missedMessages.length - 1];
   const commitCursor = (): void => {
     if (cursorCommitted) return;
@@ -1803,7 +1823,8 @@ async function processAgentConversation(chatJid: string, agentId: string): Promi
     }
 
     if (output.status === 'error') {
-      // Error handling
+      hadError = true;
+      if (output.error) lastError = output.error;
     }
   };
 
@@ -1847,6 +1868,28 @@ async function processAgentConversation(chatJid: string, agentId: string): Promi
     // Finalize session
     if (output.newSessionId && output.status !== 'error') {
       setSession(effectiveGroup.folder, output.newSessionId, agentId);
+    }
+
+    // 不可恢复的转录错误（如超大图片/MIME 错配被固化在会话历史中）
+    const errorForReset = [lastError, output.error].filter(Boolean).join(' ');
+    if ((output.status === 'error' || hadError) && errorForReset.includes('unrecoverable_transcript:')) {
+      const detail = (lastError || output.error || '').replace(/.*unrecoverable_transcript:\s*/, '');
+      logger.warn(
+        { chatJid, agentId, folder: effectiveGroup.folder, error: detail },
+        'Unrecoverable transcript error in conversation agent, auto-resetting session',
+      );
+
+      await clearSessionRuntimeFiles(effectiveGroup.folder, agentId);
+      try {
+        deleteSession(effectiveGroup.folder, agentId);
+      } catch (err) {
+        logger.error(
+          { chatJid, agentId, folder: effectiveGroup.folder, err },
+          'Failed to clear agent session state during auto-reset',
+        );
+      }
+
+      sendSystemMessage(virtualChatJid, 'context_reset', `会话已自动重置：${detail}`);
     }
 
     commitCursor();

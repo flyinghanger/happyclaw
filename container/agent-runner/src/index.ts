@@ -17,6 +17,7 @@
 import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
 
 import type {
   ContainerInput,
@@ -85,6 +86,27 @@ const MEMORY_FLUSH_DISALLOWED_TOOLS = [
 ];
 
 const IMAGE_MAX_DIMENSION = 8000; // Anthropic API 限制
+
+/**
+ * 规范化图片 MIME：
+ * - 优先使用声明值（若合法且与内容一致）
+ * - 若声明缺失或与内容不一致，使用内容识别值
+ * - 最后兜底 image/jpeg
+ */
+function resolveImageMimeType(img: { data: string; mimeType?: string }): string {
+  const declared =
+    typeof img.mimeType === 'string' && img.mimeType.startsWith('image/')
+      ? img.mimeType.toLowerCase()
+      : undefined;
+  const detected = detectImageMimeTypeFromBase64Strict(img.data);
+
+  if (declared && detected && declared !== detected) {
+    log(`Image MIME mismatch: declared=${declared}, detected=${detected}, using detected`);
+    return detected;
+  }
+
+  return declared || detected || 'image/jpeg';
+}
 
 /**
  * 从 base64 编码的图片数据中提取宽高（支持 PNG / JPEG / GIF / WebP / BMP）。
@@ -192,7 +214,7 @@ class MessageStream {
           type: 'image' as const,
           source: {
             type: 'base64' as const,
-            media_type: img.mimeType || 'image/png',
+            media_type: resolveImageMimeType(img),
             data: img.data,
           },
         })),
@@ -282,16 +304,24 @@ function isContextOverflowError(msg: string): boolean {
 /**
  * 检测会话转录中不可恢复的请求错误（400 invalid_request_error）。
  * 这类错误被固化在会话历史中，每次 resume 都会重放导致永久失败。
- * 例如：图片尺寸超过 8000px 限制、消息格式非法等。
+ * 例如：图片尺寸超过 8000px 限制、图片 MIME 声明与真实内容不一致等。
  *
  * 判定条件：必须同时满足「图片特征」+「API 拒绝」，避免对通用 400 错误误判导致会话丢失。
  */
+function isImageMimeMismatchError(msg: string): boolean {
+  return (
+    /image\s+was\s+specified\s+using\s+the\s+image\/[a-z0-9.+-]+\s+media\s+type,\s+but\s+the\s+image\s+appears\s+to\s+be\s+(?:an?\s+)?image\/[a-z0-9.+-]+\s+image/i.test(msg) ||
+    /image\/[a-z0-9.+-]+\s+media\s+type.*appears\s+to\s+be.*image\/[a-z0-9.+-]+/i.test(msg)
+  );
+}
+
 function isUnrecoverableTranscriptError(msg: string): boolean {
   const isImageSizeError =
     /image.*dimensions?\s+exceed/i.test(msg) ||
     /max\s+allowed\s+size.*pixels/i.test(msg);
+  const isMimeMismatch = isImageMimeMismatchError(msg);
   const isApiReject = /invalid_request_error/i.test(msg);
-  return isImageSizeError && isApiReject;
+  return isApiReject && (isImageSizeError || isMimeMismatch);
 }
 
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
@@ -803,7 +833,17 @@ async function runQuery(
     if (message.type === 'result') {
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+      const resultSubtype = message.subtype;
+      log(`Result #${resultCount}: subtype=${resultSubtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+
+      // SDK 在某些失败场景会返回 error_* subtype 且不抛异常。
+      // 不能把这类结果当 success(null)，否则前端会一直停留在"思考中"。
+      if (typeof resultSubtype === 'string' && (resultSubtype === 'error_during_execution' || resultSubtype.startsWith('error'))) {
+        const detail = textResult?.trim()
+          ? textResult.trim()
+          : `Claude Code execution failed (${resultSubtype})`;
+        throw new Error(detail);
+      }
 
       // SDK 将某些 API 错误包装为 subtype=success 的 result（不抛异常）
       if (textResult && isContextOverflowError(textResult)) {
@@ -941,9 +981,9 @@ async function main(): Promise<void> {
         resumeAt = queryResult.lastAssistantUuid;
       }
 
-      // 不可恢复的转录错误（如超大图片绕过预检后被固化在会话历史中）
+      // 不可恢复的转录错误（如超大图片或 MIME 错配被固化在会话历史中）
       if (queryResult.unrecoverableTranscriptError) {
-        const errorMsg = '会话历史中包含无法处理的数据（如超大图片），会话需要重置。';
+        const errorMsg = '会话历史中包含无法处理的数据（如超大图片或图片 MIME 错配），会话需要重置。';
         log(`Unrecoverable transcript error, signaling session reset`);
         writeOutput({
           status: 'error',
@@ -1084,5 +1124,36 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 }
+
+// 处理管道断开（EPIPE）：父进程关闭管道后仍有写入时，静默退出避免 code 1 错误输出
+(process.stdout as NodeJS.WriteStream & NodeJS.EventEmitter).on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EPIPE') process.exit(0);
+});
+(process.stderr as NodeJS.WriteStream & NodeJS.EventEmitter).on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EPIPE') process.exit(0);
+});
+
+/**
+ * 某些 SDK/底层 socket 会在管道断开后触发未捕获 EPIPE。
+ * 这类错误通常发生在结果已输出之后，属于"收尾写入失败"，
+ * 不应把整个 host query 标记为启动失败（code 1）。
+ */
+process.on('uncaughtException', (err: unknown) => {
+  const errno = err as NodeJS.ErrnoException;
+  if (errno?.code === 'EPIPE') {
+    process.exit(0);
+  }
+  console.error('Uncaught exception:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason: unknown) => {
+  const errno = reason as NodeJS.ErrnoException;
+  if (errno?.code === 'EPIPE') {
+    process.exit(0);
+  }
+  console.error('Unhandled rejection:', reason);
+  process.exit(1);
+});
 
 main();
