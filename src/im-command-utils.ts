@@ -69,11 +69,15 @@ export function resolveSwitch(
     };
   }
 
-  // 2. Match agent in current folder (by name, full id, or short id prefix)
+  // Helper: exact or prefix match for agent
+  const agentExact = (a: AgentInfo) =>
+    a.name.toLowerCase() === t || a.id === target || a.id.startsWith(t);
+  const agentPrefix = (a: AgentInfo) =>
+    a.name.toLowerCase().startsWith(t);
+
+  // 2. Exact match agent in current folder (by name, full id, or short id prefix)
   if (currentWs) {
-    const agent = currentWs.agents.find(
-      (a) => a.name.toLowerCase() === t || a.id === target || a.id.startsWith(t),
-    );
+    const agent = currentWs.agents.find(agentExact);
     if (agent) {
       return {
         folder: currentFolder,
@@ -83,7 +87,7 @@ export function resolveSwitch(
     }
   }
 
-  // 3. Match workspace by folder or name
+  // 3. Exact match workspace by folder or name
   const matchedWs = workspaces.find(
     (w) => w.folder.toLowerCase() === t || w.name.toLowerCase() === t,
   );
@@ -95,9 +99,45 @@ export function resolveSwitch(
     };
   }
 
-  // 4. Match agent across all workspaces (by name or short id prefix)
+  // 4. Exact match agent across all workspaces (by name or short id prefix)
   for (const ws of workspaces) {
-    const agent = ws.agents.find((a) => a.name.toLowerCase() === t || a.id.startsWith(t));
+    const agent = ws.agents.find(agentExact);
+    if (agent) {
+      return {
+        folder: ws.folder,
+        agentId: agent.id,
+        label: `${ws.name} / ${agent.name}`,
+      };
+    }
+  }
+
+  // 5. Prefix match: agent name in current folder
+  if (currentWs) {
+    const agent = currentWs.agents.find(agentPrefix);
+    if (agent) {
+      return {
+        folder: currentFolder,
+        agentId: agent.id,
+        label: `${currentWs.name} / ${agent.name}`,
+      };
+    }
+  }
+
+  // 6. Prefix match: workspace name or folder
+  const prefixWs = workspaces.find(
+    (w) => w.folder.toLowerCase().startsWith(t) || w.name.toLowerCase().startsWith(t),
+  );
+  if (prefixWs) {
+    return {
+      folder: prefixWs.folder,
+      agentId: null,
+      label: `${prefixWs.name} / 主对话`,
+    };
+  }
+
+  // 7. Prefix match: agent name across all workspaces
+  for (const ws of workspaces) {
+    const agent = ws.agents.find(agentPrefix);
     if (agent) {
       return {
         folder: ws.folder,
@@ -154,8 +194,9 @@ export function formatWorkspaceList(
 
   const lines: string[] = ['📂 工作区列表：'];
 
-  // Collect a concrete example for the hint at the end
-  let exampleTarget = '';
+  // Collect example targets: one by name, one by id
+  let exampleName = '';
+  let exampleId = '';
 
   for (const ws of workspaces) {
     const isCurrent = ws.folder === currentFolder;
@@ -172,22 +213,27 @@ export function formatWorkspaceList(
       const shortId = agent.id.slice(0, 4);
       lines.push(`  · ${agent.name} [${shortId}] ${statusIcon}${agentMarker}`);
 
-      // Pick an agent that is NOT the current one as the example target
-      if (!exampleTarget && !(isCurrent && currentAgentId === agent.id)) {
-        exampleTarget = agent.name;
+      // Pick a non-current agent for examples
+      if (!(isCurrent && currentAgentId === agent.id)) {
+        if (!exampleName) exampleName = agent.name;
+        if (!exampleId) exampleId = shortId;
       }
     }
 
-    // Pick a workspace that is NOT the current one as the example target
-    if (!exampleTarget && !isCurrent) {
-      exampleTarget = ws.name;
+    // Pick a non-current workspace name for example
+    if (!exampleName && !isCurrent) {
+      exampleName = ws.name;
     }
   }
 
   lines.push('');
-  lines.push('💡 使用 /sw <名称> 切换');
-  if (exampleTarget) {
-    lines.push(`   例: /sw ${exampleTarget}`);
+  lines.push('💡 使用 /switch <名称或ID> 切换，支持前缀匹配');
+  if (exampleName && exampleId) {
+    const prefix = exampleName.slice(0, Math.max(3, Math.ceil(exampleName.length / 2)));
+    lines.push(`   例: /switch ${exampleName}  或  /switch ${prefix}  或  /switch ${exampleId}`);
+  } else if (exampleName) {
+    const prefix = exampleName.slice(0, Math.max(3, Math.ceil(exampleName.length / 2)));
+    lines.push(`   例: /switch ${exampleName}  或  /switch ${prefix}`);
   }
   return lines.join('\n');
 }

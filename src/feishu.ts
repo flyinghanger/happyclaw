@@ -617,8 +617,10 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
     const slashMatch = text?.trim().match(/^\/(\S+)(.*)$/);
     if (slashMatch && onCommand) {
       const cmdBody = (slashMatch[1] + slashMatch[2]).trim();
+      logger.info({ chatJid, cmd: slashMatch[1], cmdBody }, 'Feishu slash command detected');
       try {
         const reply = await onCommand(chatJid, cmdBody);
+        logger.info({ chatJid, cmd: slashMatch[1], hasReply: !!reply, replyLen: reply?.length }, 'Feishu slash command processed');
         if (reply) {
           await sendTextToChat(chatId, reply);
           return; // 已知命令，拦截

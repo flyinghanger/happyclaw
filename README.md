@@ -76,6 +76,17 @@ HappyClaw 是一个基于 [Claude Agent SDK](https://github.com/anthropics/claud
 
 每个用户可独立配置自己的 IM 通道（飞书应用凭据、Telegram Bot Token），互不干扰。消息统一路由：飞书来源回飞书，Telegram 来源回 Telegram，Web 来源回 Web。
 
+**IM 斜杠命令** — 在飞书/Telegram 中通过 `/` 前缀触发，远程管理工作区和对话：
+
+| 命令 | 用途 |
+|------|------|
+| `/list` | 查看所有工作区和对话列表 |
+| `/switch <目标>` | 切换工作区或对话（支持名称、ID、前缀匹配） |
+| `/new <名称>` | 创建新对话并自动切换 |
+| `/recall` | AI 总结最近对话记录 |
+| `/status` | 查看当前位置和状态 |
+| `/clear` | 清除当前对话上下文 |
+
 
 ### Agent 执行引擎
 
@@ -378,6 +389,7 @@ happyclaw/
 │   ├── feishu.ts                 #   飞书连接工厂（WebSocket 长连接）
 │   ├── telegram.ts               #   Telegram 连接工厂（Bot API）
 │   ├── im-manager.ts             #   IM 连接池（per-user 飞书/Telegram 连接管理）
+│   ├── im-command-utils.ts       #   IM 斜杠命令工具（/list /switch /recall 等）
 │   ├── im-downloader.ts          #   IM 文件下载工具（保存到工作区 downloads/）
 │   ├── container-runner.ts       #   Docker / 宿主机进程管理
 │   ├── group-queue.ts            #   并发控制队列

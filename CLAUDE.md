@@ -51,7 +51,8 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/middleware/auth.ts` | 认证中间件：Cookie Session 校验、权限检查中间件工厂 |
 | `src/im-channel.ts` | 统一 IM 通道接口（`IMChannel`）、Feishu/Telegram 适配器工厂 |
 | `src/intent-analyzer.ts` | 消息意图分析：stop/correction/continue 识别 |
-| `src/commands.ts` | 斜杠命令处理器（`/clear` 重置会话） |
+| `src/im-command-utils.ts` | IM 斜杠命令纯函数工具：`resolveSwitch()`（目标解析，支持精确/前缀匹配）、`formatWorkspaceList()`、`formatContextMessages()` |
+| `src/commands.ts` | Web 端斜杠命令处理器（`/clear` 重置会话） |
 | `src/telegram-pairing.ts` | Telegram 配对码：6 位随机码，5 分钟过期 |
 | `src/terminal-manager.ts` | Docker 容器终端管理（node-pty + pipe fallback，WebSocket 双向通信） |
 | `src/message-attachments.ts` | 图片附件规范化（MIME 检测、Data URL 解析） |
@@ -516,6 +517,23 @@ scripts/                      # 构建辅助脚本
 - 断开该用户的旧连接
 - 如果新配置有效（`enabled=true` 且凭据非空），立即建立新连接
 - `ignoreMessagesBefore` 设为当前时间戳，避免处理堆积消息
+
+### 8.11 IM 斜杠命令
+
+飞书/Telegram 中以 `/` 开头的消息会被拦截为斜杠命令（未知命令继续作为普通消息处理）。命令在主服务进程的 `handleCommand()` 中分发，纯函数逻辑在 `im-command-utils.ts` 中（便于单测）。
+
+| 命令 | 缩写 | 用途 |
+|------|------|------|
+| `/list` | `/ls` | 查看所有工作区和对话列表，标记当前位置，显示 Agent 短 ID |
+| `/switch <目标>` | `/sw` | 切换到指定工作区或对话，支持名称、ID、前缀匹配 |
+| `/new <名称>` | - | 在当前工作区创建新对话并自动切换 |
+| `/status` | - | 查看当前所在的工作区/对话状态 |
+| `/recall` | `/rc` | 调用 Claude CLI（`--print` 模式）总结最近 10 条消息，API 不可用时 fallback 到原始消息列表 |
+| `/clear` | - | 清除当前对话的会话上下文 |
+
+`/switch` 匹配优先级：精确匹配（名称 > folder > 完整 ID > 短 ID）→ 前缀匹配（当前工作区 Agent → 跨工作区 → Agent 名称）。
+
+`/recall` 通过 `execFile('claude', ['--print'])` + stdin 管道调用 Claude CLI，复用与 Agent Runner 相同的 OAuth 认证机制。
 
 ## 9. 环境变量
 
