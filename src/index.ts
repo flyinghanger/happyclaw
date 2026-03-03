@@ -66,10 +66,18 @@ import {
   markAllRunningTaskAgentsAsError,
   getSession,
   listAgentsByJid,
+  getGroupsByOwner,
+  getMessagesPage,
 } from './db.js';
 // feishu.js deprecated exports are no longer needed; imManager handles all connections
 import { imManager } from './im-manager.js';
 import { getChannelType } from './im-channel.js';
+import {
+  resolveSwitch,
+  formatContextMessages,
+  formatWorkspaceList,
+  type WorkspaceInfo,
+} from './im-command-utils.js';
 import { analyzeIntent } from './intent-analyzer.js';
 import {
   getClaudeProviderConfig as getClaudeProviderConfigForRefresh,
@@ -140,6 +148,83 @@ function unbindImGroup(jid: string, reason: string): void {
   imSendFailCounts.delete(jid);
   imHealthCheckFailCounts.delete(jid);
   logger.info({ jid, agentId }, reason);
+}
+
+// ─── IM Remote Target Switching ──────────────────────────────────
+// Tracks which folder/agentId each IM channel is currently bound to.
+// Defaults to the user's home folder + main conversation (agentId=null).
+interface ImTarget {
+  folder: string;
+  agentId: string | null; // null = main conversation
+}
+const imTargets: Record<string, ImTarget> = {};
+
+/**
+ * Resolve the effective folder for an IM JID.
+ * If the user has /switch-ed, returns the overridden folder; otherwise the registered folder.
+ */
+function getImEffectiveFolder(chatJid: string): string | undefined {
+  const target = imTargets[chatJid];
+  if (target) return target.folder;
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  return group?.folder;
+}
+
+/**
+ * Resolve the effective agentId for an IM JID.
+ * Returns null (= main conversation) if no /switch override.
+ */
+function getImEffectiveAgentId(chatJid: string): string | null {
+  return imTargets[chatJid]?.agentId ?? null;
+}
+
+/**
+ * Find the primary web JID for a folder (the one used for web:xxx groups).
+ */
+function findWebJidForFolder(folder: string): string | null {
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    if (group.folder === folder && jid.startsWith('web:')) return jid;
+  }
+  // Check DB as fallback
+  const jids = getJidsByFolder(folder);
+  for (const jid of jids) {
+    if (jid.startsWith('web:')) return jid;
+  }
+  return null;
+}
+
+/**
+ * Collect all accessible workspaces for a user as pure WorkspaceInfo[].
+ * Bridges DB state into a testable data structure.
+ */
+function collectWorkspaces(userId: string): WorkspaceInfo[] {
+  const ownedGroups = getGroupsByOwner(userId);
+  const user = getUserById(userId);
+  const isAdmin = user?.role === 'admin';
+
+  const seen = new Set<string>();
+  const workspaces: WorkspaceInfo[] = [];
+
+  for (const g of ownedGroups) {
+    if (!g.jid.startsWith('web:')) continue;
+    if (seen.has(g.folder)) continue;
+    seen.add(g.folder);
+
+    const agents = listAgentsByJid(g.jid)
+      .filter((a) => a.kind === 'conversation')
+      .map((a) => ({ id: a.id, name: a.name, status: a.status }));
+
+    workspaces.push({ folder: g.folder, name: g.name, agents });
+  }
+
+  if (isAdmin && !seen.has(MAIN_GROUP_FOLDER)) {
+    const agents = listAgentsByJid(DEFAULT_MAIN_JID)
+      .filter((a) => a.kind === 'conversation')
+      .map((a) => ({ id: a.id, name: a.name, status: a.status }));
+    workspaces.push({ folder: MAIN_GROUP_FOLDER, name: DEFAULT_MAIN_NAME, agents });
+  }
+
+  return workspaces;
 }
 
 function isCursorAfter(candidate: MessageCursor, base: MessageCursor): boolean {
@@ -229,13 +314,49 @@ async function clearSessionRuntimeFiles(folder: string, agentId?: string): Promi
  * Returns a reply string on success, or null if command not recognized.
  */
 async function handleCommand(chatJid: string, command: string): Promise<string | null> {
-  if (command !== 'clear') return null;
+  const parts = command.split(/\s+/);
+  const cmd = parts[0];
+  const arg = parts.slice(1).join(' ').trim();
 
+  switch (cmd) {
+    case 'clear':
+      return handleClearCommand(chatJid);
+    case 'list':
+    case 'ls':
+      return handleListCommand(chatJid);
+    case 'switch':
+    case 'sw':
+      return handleSwitchCommand(chatJid, arg);
+    case 'new':
+      return handleNewConversationCommand(chatJid, arg);
+    case 'status':
+      return handleStatusCommand(chatJid);
+    case 'recall':
+    case 'rc':
+      return handleRecallCommand(chatJid);
+    default:
+      return null;
+  }
+}
+
+async function handleClearCommand(chatJid: string): Promise<string> {
+  // Use the effective folder (may be overridden by /switch)
+  const effectiveFolder = getImEffectiveFolder(chatJid);
+  if (!effectiveFolder) return '未找到当前工作区';
+
+  const agentId = getImEffectiveAgentId(chatJid);
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
-  if (!group) return null;
+  if (!group) return '未找到当前工作区';
 
   try {
-    await executeSessionReset(chatJid, group.folder, {
+    if (agentId) {
+      // Clear agent conversation session
+      await clearSessionRuntimeFiles(effectiveFolder, agentId);
+      deleteSession(effectiveFolder, agentId);
+      return '已清除当前对话上下文 ✓';
+    }
+    // Clear main conversation
+    await executeSessionReset(chatJid, effectiveFolder, {
       queue,
       sessions,
       broadcast: broadcastNewMessage,
@@ -245,6 +366,205 @@ async function handleCommand(chatJid: string, command: string): Promise<string |
     logger.error({ chatJid, err }, 'handleCommand /clear failed');
     return '清除上下文失败，请稍后重试';
   }
+}
+
+function handleListCommand(chatJid: string): string {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '当前 IM 未绑定工作区';
+
+  const userId = group.created_by;
+  if (!userId) return '无法确定用户身份';
+
+  const workspaces = collectWorkspaces(userId);
+  if (workspaces.length === 0) return '没有可用的工作区';
+
+  const currentFolder = getImEffectiveFolder(chatJid) || group.folder;
+  const currentAgentId = getImEffectiveAgentId(chatJid);
+
+  return formatWorkspaceList(workspaces, currentFolder, currentAgentId);
+}
+
+function handleSwitchCommand(chatJid: string, target: string): string {
+  if (!target) return '用法: /switch <工作区名称|对话名称>\n\n使用 /list 查看可用列表';
+
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '当前 IM 未绑定工作区';
+
+  const userId = group.created_by;
+  if (!userId) return '无法确定用户身份';
+
+  const currentFolder = getImEffectiveFolder(chatJid) || group.folder;
+  const workspaces = collectWorkspaces(userId);
+
+  const result = resolveSwitch(target, currentFolder, workspaces);
+  if (!result) {
+    return `❌ 未找到「${target}」\n\n使用 /list 查看可用的工作区和对话`;
+  }
+
+  imTargets[chatJid] = { folder: result.folder, agentId: result.agentId };
+  return `✅ 已切换到 ${result.label}` + getConversationContext(result.folder, result.agentId);
+}
+
+function handleNewConversationCommand(chatJid: string, name: string): string {
+  if (!name) return '用法: /new <对话名称>';
+  if (name.length > 40) return '对话名称不能超过 40 个字符';
+
+  const effectiveFolder = getImEffectiveFolder(chatJid) || '';
+  if (!effectiveFolder) return '当前未绑定工作区';
+
+  const webJid = findWebJidForFolder(effectiveFolder);
+  if (!webJid) return '找不到当前工作区的 Web JID';
+
+  const group = registeredGroups[webJid] ?? getRegisteredGroup(webJid);
+  if (!group) return '工作区不存在';
+
+  const imGroup = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  const userId = imGroup?.created_by;
+
+  // Create agent conversation (same logic as routes/agents.ts)
+  const agentId = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  createAgent({
+    id: agentId,
+    group_folder: effectiveFolder,
+    chat_jid: webJid,
+    name,
+    prompt: '',
+    status: 'idle',
+    kind: 'conversation',
+    created_by: userId || null,
+    created_at: now,
+    completed_at: null,
+    result_summary: null,
+  });
+
+  // Create IPC and session directories
+  const agentIpcDir = path.join(DATA_DIR, 'ipc', effectiveFolder, 'agents', agentId);
+  fs.mkdirSync(path.join(agentIpcDir, 'input'), { recursive: true });
+  fs.mkdirSync(path.join(agentIpcDir, 'messages'), { recursive: true });
+  fs.mkdirSync(path.join(agentIpcDir, 'tasks'), { recursive: true });
+
+  const agentSessionDir = path.join(DATA_DIR, 'sessions', effectiveFolder, 'agents', agentId, '.claude');
+  fs.mkdirSync(agentSessionDir, { recursive: true });
+
+  const virtualChatJid = `${webJid}#agent:${agentId}`;
+  ensureChatExists(virtualChatJid);
+
+  broadcastAgentStatus(webJid, agentId, 'idle', name, '');
+
+  // Auto-switch to the new conversation
+  imTargets[chatJid] = { folder: effectiveFolder, agentId };
+
+  const folderName = findGroupNameByFolder(effectiveFolder);
+  logger.info({ chatJid, agentId, name, folder: effectiveFolder }, 'Conversation created via IM command');
+  return `✅ 已创建对话「${name}」并切换\n📍 ${folderName} / ${name}`;
+}
+
+function handleStatusCommand(chatJid: string): string {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '当前 IM 未绑定工作区';
+
+  const effectiveFolder = getImEffectiveFolder(chatJid) || group.folder;
+  const agentId = getImEffectiveAgentId(chatJid);
+  const folderName = findGroupNameByFolder(effectiveFolder);
+
+  let conversationName = '主对话';
+  if (agentId) {
+    const agent = getAgent(agentId);
+    conversationName = agent?.name || agentId;
+  }
+
+  const lines = [
+    `📍 当前位置: ${folderName} / ${conversationName}`,
+    `📁 工作区: ${effectiveFolder}`,
+  ];
+
+  if (agentId) {
+    const agent = getAgent(agentId);
+    if (agent) {
+      lines.push(`💬 对话状态: ${agent.status}`);
+    }
+  }
+
+  lines.push('', '💡 /list 查看全部 · /switch 切换 · /new 新建对话');
+  return lines.join('\n');
+}
+
+function handleRecallCommand(chatJid: string): string {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '当前 IM 未绑定工作区';
+
+  const effectiveFolder = getImEffectiveFolder(chatJid) || group.folder;
+  const agentId = getImEffectiveAgentId(chatJid);
+  const folderName = findGroupNameByFolder(effectiveFolder);
+
+  let conversationName = '主对话';
+  if (agentId) {
+    const agent = getAgent(agentId);
+    conversationName = agent?.name || agentId;
+  }
+
+  const header = `🧠 ${folderName} / ${conversationName}`;
+  const context = getConversationContext(effectiveFolder, agentId, 10, 200);
+
+  if (!context) return `${header}\n\n📭 该对话暂无消息记录`;
+  return header + context;
+}
+
+/**
+ * Forward a reply to all IM channels that have /switch-ed to a given folder+agentId.
+ * This ensures IM users see replies even though messages were re-routed to a web JID.
+ */
+async function forwardReplyToImTargets(
+  folder: string,
+  agentId: string | null,
+  text: string,
+): Promise<void> {
+  for (const [imJid, target] of Object.entries(imTargets)) {
+    if (target.folder === folder && target.agentId === agentId) {
+      try {
+        await imManager.sendMessage(imJid, text);
+      } catch (err) {
+        logger.error({ imJid, folder, agentId, err }, 'Failed to forward reply to IM target');
+      }
+    }
+  }
+}
+
+/**
+ * Find the display name for a folder by looking up its web group.
+ */
+function findGroupNameByFolder(folder: string): string {
+  const webJid = findWebJidForFolder(folder);
+  if (webJid) {
+    const group = registeredGroups[webJid] ?? getRegisteredGroup(webJid);
+    if (group) return group.name;
+  }
+  return folder;
+}
+
+/**
+ * Fetch recent messages and format a context summary.
+ * Thin wrapper: DB fetch + pure formatContextMessages().
+ */
+function getConversationContext(
+  folder: string,
+  agentId: string | null,
+  count = 5,
+  maxLen = 80,
+): string {
+  const webJid = findWebJidForFolder(folder);
+  if (!webJid) return '';
+
+  const chatJid = agentId ? `${webJid}#agent:${agentId}` : webJid;
+  const messages = getMessagesPage(chatJid, undefined, count);
+
+  if (messages.length === 0) return '\n\n📭 该对话暂无消息记录';
+
+  // Messages are newest-first from DB; reverse to chronological order
+  const formatted = formatContextMessages(messages.reverse(), maxLen);
+  return formatted || '\n\n📭 该对话暂无消息记录';
 }
 
 async function setTyping(jid: string, isTyping: boolean): Promise<void> {
@@ -778,6 +1098,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             await sendMessage(chatJid, text, {
               sendToIM: shouldReplyToIM,
             });
+            // Forward to IM channels that have /switch-ed to this folder's main conversation
+            await forwardReplyToImTargets(group.folder, null, text);
             sentReply = true;
             // Persist cursor as soon as a visible reply is emitted.
             // Long-lived runners may stay alive for idleTimeout, and waiting
@@ -1894,6 +2216,8 @@ async function processAgentConversation(chatJid: string, agentId: string): Promi
           }
         }
 
+        // Forward to IM channels that have /switch-ed to this agent conversation
+        await forwardReplyToImTargets(effectiveGroup.folder, agentId, text);
         commitCursor();
         resetIdleTimer();
       }
@@ -2023,6 +2347,65 @@ async function startMessageLoop(): Promise<void> {
         }
 
         for (const [chatJid, groupMessages] of messagesByGroup) {
+          // ── IM Remote Target Routing ──────────────────────────
+          // If this IM channel has been /switch-ed to a different folder or
+          // agent conversation, re-route the messages to the correct target.
+          const imTarget = imTargets[chatJid];
+          if (imTarget && getChannelType(chatJid) !== null) {
+            const targetFolder = imTarget.folder;
+            const targetAgentId = imTarget.agentId;
+            const targetWebJid = findWebJidForFolder(targetFolder);
+
+            if (targetWebJid) {
+              // Copy each message to the target JID so processGroupMessages /
+              // processAgentConversation sees them under the correct chat_jid.
+              const destJid = targetAgentId
+                ? `${targetWebJid}#agent:${targetAgentId}`
+                : targetWebJid;
+
+              for (const msg of groupMessages) {
+                const newId = crypto.randomUUID();
+                ensureChatExists(destJid);
+                storeMessageDirect(
+                  newId,
+                  destJid,
+                  msg.sender,
+                  msg.sender_name,
+                  msg.content,
+                  msg.timestamp,
+                  false,
+                  msg.attachments ?? undefined,
+                );
+              }
+
+              // Advance the IM JID cursor so these messages aren't re-processed
+              const lastMsg = groupMessages[groupMessages.length - 1];
+              lastAgentTimestamp[chatJid] = {
+                timestamp: lastMsg.timestamp,
+                id: lastMsg.id,
+              };
+
+              if (targetAgentId) {
+                // Trigger agent conversation processing
+                const taskId = `im-agent-conv:${targetAgentId}:${Date.now()}`;
+                queue.enqueueTask(`${targetWebJid}#agent:${targetAgentId}`, taskId, async () => {
+                  await processAgentConversation(targetWebJid, targetAgentId);
+                });
+              } else {
+                // Enqueue for normal group message processing
+                queue.closeStdin(targetWebJid);
+                queue.enqueueMessageCheck(targetWebJid);
+              }
+
+              logger.info(
+                { chatJid, targetFolder, targetAgentId, destJid, count: groupMessages.length },
+                'IM messages re-routed via /switch target',
+              );
+              continue; // Skip normal processing for this IM JID
+            }
+          }
+          // ── End IM Remote Target Routing ──────────────────────
+
           let group = registeredGroups[chatJid];
           if (!group) {
             const dbGroup = getRegisteredGroup(chatJid);
