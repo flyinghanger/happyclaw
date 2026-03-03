@@ -402,7 +402,7 @@ function handleSwitchCommand(chatJid: string, target: string): string {
   }
 
   imTargets[chatJid] = { folder: result.folder, agentId: result.agentId };
-  return `✅ 已切换到 ${result.label}` + getConversationContext(result.folder, result.agentId);
+  return `✅ 已切换到 ${result.label}` + getConversationContext(result.folder, result.agentId) + '\n\n💡 使用 /recall 总结最近对话记录';
 }
 
 function handleNewConversationCommand(chatJid: string, name: string): string {
@@ -492,8 +492,13 @@ function handleStatusCommand(chatJid: string): string {
 }
 
 async function handleRecallCommand(chatJid: string): Promise<string> {
+  logger.info({ chatJid }, '/recall command received');
+
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
-  if (!group) return '当前 IM 未绑定工作区';
+  if (!group) {
+    logger.warn({ chatJid }, '/recall: no registered group found');
+    return '当前 IM 未绑定工作区';
+  }
 
   const effectiveFolder = getImEffectiveFolder(chatJid) || group.folder;
   const agentId = getImEffectiveAgentId(chatJid);
@@ -505,88 +510,83 @@ async function handleRecallCommand(chatJid: string): Promise<string> {
     conversationName = agent?.name || agentId;
   }
 
+  logger.info({ chatJid, effectiveFolder, agentId, conversationName }, '/recall: resolved target');
+
   const header = `🧠 ${folderName} / ${conversationName}`;
 
   // Fetch recent messages for summarization
   const webJid = findWebJidForFolder(effectiveFolder);
-  if (!webJid) return `${header}\n\n📭 该对话暂无消息记录`;
+  if (!webJid) {
+    logger.warn({ chatJid, effectiveFolder }, '/recall: no web JID found for folder');
+    return `${header}\n\n📭 该对话暂无消息记录`;
+  }
 
   const chatJidForMessages = agentId ? `${webJid}#agent:${agentId}` : webJid;
-  const messages = getMessagesPage(chatJidForMessages, undefined, 20);
+  const messages = getMessagesPage(chatJidForMessages, undefined, 10);
+  logger.info({ chatJid, chatJidForMessages, messageCount: messages.length }, '/recall: fetched messages');
+
   if (messages.length === 0) return `${header}\n\n📭 该对话暂无消息记录`;
 
   // Build chronological transcript
   const transcript = messages.reverse().map((msg) => {
     const who = msg.is_from_me ? 'AI' : (msg.sender_name || '用户');
-    const text = (msg.content || '').slice(0, 500);
+    const text = (msg.content || '').slice(0, 300);
     return `${who}: ${text}`;
   }).join('\n');
 
-  // Try to summarize via Claude API
-  const summary = await summarizeWithClaude(transcript);
-  if (summary) return `${header}\n\n${summary}`;
+  logger.info({ chatJid, transcriptLen: transcript.length }, '/recall: built transcript, calling Claude CLI');
 
-  // Fallback: raw context if API unavailable
+  // Try to summarize via Claude CLI
+  const summary = await summarizeWithClaude(transcript);
+  if (summary) {
+    logger.info({ chatJid, summaryLen: summary.length }, '/recall: summary generated successfully');
+    return `${header}\n\n${summary}`;
+  }
+
+  logger.warn({ chatJid }, '/recall: summary failed, falling back to raw messages');
+
+  // Fallback: raw context if CLI unavailable
   const context = getConversationContext(effectiveFolder, agentId, 10, 200);
   if (!context) return `${header}\n\n📭 该对话暂无消息记录`;
   return header + context;
 }
 
 /**
- * Call Claude API (Haiku) to summarize a conversation transcript.
- * Returns null if API is not configured or call fails.
+ * Call Claude CLI (`claude --print`) to summarize a conversation transcript.
+ * Uses the same auth mechanism (OAuth / API Key) as normal agent conversations.
+ * Returns null if CLI is unavailable or call fails.
  */
 async function summarizeWithClaude(transcript: string): Promise<string | null> {
-  const config = getClaudeProviderConfigForRefresh();
+  const prompt = `请用简洁的中文总结以下对话的要点和进展，重点说明讨论了什么、达成了什么结论、还有什么待办事项。不要逐条翻译，而是提炼核心信息。\n\n${transcript}`;
 
-  // Determine auth headers and base URL
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'anthropic-version': '2023-06-01',
-  };
-  let baseUrl = config.anthropicBaseUrl || 'https://api.anthropic.com';
+  return new Promise((resolve) => {
+    logger.info({ promptLen: prompt.length }, 'summarizeWithClaude: invoking claude CLI via stdin');
 
-  if (config.anthropicApiKey) {
-    headers['x-api-key'] = config.anthropicApiKey;
-  } else if (config.claudeCodeOauthToken) {
-    headers['Authorization'] = `Bearer ${config.claudeCodeOauthToken}`;
-  } else if (config.anthropicAuthToken) {
-    headers['Authorization'] = `Bearer ${config.anthropicAuthToken}`;
-  } else {
-    return null; // No API credentials
-  }
-
-  // Trim trailing slash
-  baseUrl = baseUrl.replace(/\/+$/, '');
-
-  try {
-    const resp = await fetch(`${baseUrl}/v1/messages`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1024,
-        messages: [
-          {
-            role: 'user',
-            content: `请用简洁的中文总结以下对话的要点和进展，重点说明讨论了什么、达成了什么结论、还有什么待办事项。不要逐条翻译，而是提炼核心信息。\n\n${transcript}`,
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(15000),
+    const child = execFile('claude', ['--print', '--model', 'claude-haiku-4-5-20251001'], {
+      timeout: 30000,
+      maxBuffer: 1024 * 1024,
+      env: { ...process.env, CLAUDECODE: '' },
+    }, (err, stdout, stderr) => {
+      if (err) {
+        const e = err as Error & { code?: number | string };
+        logger.warn({
+          message: e.message?.slice(0, 200),
+          code: e.code,
+          stderr: stderr?.slice(0, 300),
+          stdout: stdout?.slice(0, 300),
+        }, 'summarizeWithClaude: CLI call failed');
+        resolve(null);
+        return;
+      }
+      const text = stdout.trim();
+      logger.info({ stdoutLen: text.length, stderr: stderr?.trim().slice(0, 200) || '' }, 'summarizeWithClaude: CLI returned');
+      resolve(text || null);
     });
 
-    if (!resp.ok) {
-      logger.warn({ status: resp.status }, 'Claude API call failed for /recall summary');
-      return null;
-    }
-
-    const data = (await resp.json()) as { content?: Array<{ text?: string }> };
-    return data.content?.[0]?.text || null;
-  } catch (err) {
-    logger.warn({ err }, 'Claude API call error for /recall summary');
-    return null;
-  }
+    // Feed prompt via stdin to avoid arg length limits and special char issues
+    child.stdin?.write(prompt);
+    child.stdin?.end();
+  });
 }
 
 /**
