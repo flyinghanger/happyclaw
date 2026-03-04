@@ -497,7 +497,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             });
           }
         }}
-        onBindIm={setBindingAgentId}
+        onBindIm={isHome ? setBindingAgentId : undefined}
       />
 
       {/* Main Content: Messages + Sidebar */}

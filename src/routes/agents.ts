@@ -232,6 +232,10 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
     return c.json({ error: 'Forbidden' }, 403);
   }
 
+  if (!group.is_home) {
+    return c.json({ error: 'IM binding is only available for home workspaces' }, 400);
+  }
+
   const siblingJids = getJidsByFolder(group.folder);
   // Pre-filter: exclude web JIDs and Telegram private chats
   const imJids = siblingJids.filter((j) => !j.startsWith('web:') && !isTelegramPrivateChat(j));
@@ -313,6 +317,10 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
     return c.json({ error: 'Forbidden' }, 403);
   }
 
+  if (!group.is_home) {
+    return c.json({ error: 'IM binding is only available for home workspaces' }, 400);
+  }
+
   const agent = getAgent(agentId);
   if (!agent || agent.chat_jid !== jid) {
     return c.json({ error: 'Agent not found' }, 404);
@@ -367,6 +375,10 @@ router.delete('/:jid/agents/:agentId/im-binding/:imJid', authMiddleware, async (
   }
   if (!canAccessGroup(user, { ...group, jid })) {
     return c.json({ error: 'Forbidden' }, 403);
+  }
+
+  if (!group.is_home) {
+    return c.json({ error: 'IM binding is only available for home workspaces' }, 400);
   }
 
   const agent = getAgent(agentId);
