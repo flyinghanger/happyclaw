@@ -10,7 +10,7 @@ import { FilePanel } from './FilePanel';
 import { ContainerEnvPanel } from './ContainerEnvPanel';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
-import { ArrowLeft, Link, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Sun, Terminal, Users, X } from 'lucide-react';
+import { ArrowLeft, Code, Link, Map, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Sun, Terminal, Users, X } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useTheme } from '../../hooks/useTheme';
 import { cn } from '@/lib/utils';
@@ -21,6 +21,7 @@ import { GroupSkillsPanel } from './GroupSkillsPanel';
 import { GroupMembersPanel } from './GroupMembersPanel';
 import { AgentTabBar } from './AgentTabBar';
 import { ImBindingDialog } from './ImBindingDialog';
+import { showToast } from '../../utils/toast';
 
 /** Sentinel value for binding the main conversation (vs. a specific agent) */
 const MAIN_BINDING = '__main__' as const;
@@ -72,6 +73,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   // null = dialog closed; MAIN_BINDING = main conversation; other = agent id
   const [bindingAgentId, setBindingAgentId] = useState<string | null>(null);
+  // Code / Plan mode toggle (per group)
+  const [permissionMode, setPermissionMode] = useState<'bypassPermissions' | 'plan'>('bypassPermissions');
   const [imStatus, setImStatus] = useState<{ feishu: boolean; telegram: boolean } | null>(null);
   const [imBannerDismissed, setImBannerDismissed] = useState(() =>
     localStorage.getItem('im-banner-dismissed') === '1',
@@ -259,6 +262,24 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     setShowResetConfirm(false);
   };
 
+  const togglePermissionMode = async () => {
+    const newMode = permissionMode === 'bypassPermissions' ? 'plan' : 'bypassPermissions';
+    setPermissionMode(newMode);
+    try {
+      const res = await api.put<{ success: boolean; mode: string; applied: boolean }>(
+        `/api/groups/${encodeURIComponent(groupJid)}/mode`, { mode: newMode },
+      );
+      if (res.applied === false) {
+        const label = newMode === 'plan' ? 'Plan' : 'Code';
+        showToast(`已切换到 ${label} 模式`, '容器未运行，模式将在下次启动时生效');
+      }
+    } catch {
+      // Revert on failure
+      setPermissionMode(permissionMode);
+      showToast('模式切换失败', '请稍后重试');
+    }
+  };
+
   // --- Drag resize handlers (mouse + touch) ---
   const startDrag = useCallback((startY: number) => {
     isDraggingRef.current = true;
@@ -422,6 +443,21 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           aria-label={theme === 'light' ? '切换到暗色模式' : theme === 'dark' ? '跟随系统' : '切换到亮色模式'}
         >
           {theme === 'light' ? <Moon className="w-5 h-5" /> : theme === 'dark' ? <Monitor className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
+        </button>
+        {/* Desktop: Code / Plan mode toggle */}
+        <button
+          onClick={togglePermissionMode}
+          className={cn(
+            'hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer border',
+            permissionMode === 'plan'
+              ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100 dark:bg-amber-950/50 dark:text-amber-400 dark:border-amber-800 dark:hover:bg-amber-900/50'
+              : 'bg-background text-muted-foreground border-border hover:bg-accent',
+          )}
+          title={permissionMode === 'plan' ? '当前为 Plan 模式（仅规划），点击切换到 Code 模式' : '当前为 Code 模式（可执行），点击切换到 Plan 模式'}
+          aria-label={permissionMode === 'plan' ? '切换到 Code 模式' : '切换到 Plan 模式'}
+        >
+          {permissionMode === 'plan' ? <Map className="w-3.5 h-3.5" /> : <Code className="w-3.5 h-3.5" />}
+          {permissionMode === 'plan' ? 'Plan' : 'Code'}
         </button>
         {/* Desktop: toggle display mode */}
         <button
@@ -873,6 +909,18 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             <SheetTitle>工作区操作</SheetTitle>
           </SheetHeader>
           <div className="space-y-2 pt-2">
+            <button
+              onClick={() => { setMobileActionsOpen(false); togglePermissionMode(); }}
+              className={cn(
+                'w-full text-left px-4 py-3 rounded-lg border transition-colors cursor-pointer text-sm flex items-center gap-2',
+                permissionMode === 'plan'
+                  ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
+                  : 'border-border hover:bg-accent text-foreground',
+              )}
+            >
+              {permissionMode === 'plan' ? <Map className="w-4 h-4" /> : <Code className="w-4 h-4" />}
+              {permissionMode === 'plan' ? '切换到 Code 模式（当前为 Plan 模式）' : '切换到 Plan 模式（当前为 Code 模式）'}
+            </button>
             <button
               onClick={openMobileFiles}
               className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
