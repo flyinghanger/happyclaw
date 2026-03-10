@@ -290,7 +290,11 @@ export function initDatabase(): void {
   ensureColumn('invite_codes', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
-  ensureColumn('registered_groups', 'execution_mode', "TEXT DEFAULT 'container'");
+  ensureColumn(
+    'registered_groups',
+    'execution_mode',
+    "TEXT DEFAULT 'container'",
+  );
   ensureColumn('registered_groups', 'custom_cwd', 'TEXT');
   ensureColumn('registered_groups', 'init_source_path', 'TEXT');
   ensureColumn('registered_groups', 'init_git_url', 'TEXT');
@@ -310,27 +314,36 @@ export function initDatabase(): void {
   ensureColumn('agents', 'kind', "TEXT NOT NULL DEFAULT 'task'");
   ensureColumn('registered_groups', 'target_agent_id', 'TEXT');
   ensureColumn('registered_groups', 'target_main_jid', 'TEXT');
-  ensureColumn('registered_groups', 'reply_policy', "TEXT DEFAULT 'source_only'");
+  ensureColumn(
+    'registered_groups',
+    'reply_policy',
+    "TEXT DEFAULT 'source_only'",
+  );
   ensureColumn('registered_groups', 'require_mention', 'INTEGER DEFAULT 1');
   ensureColumn('messages', 'token_usage', 'TEXT');
 
   // Add index on target_agent_id for fast lookup of IM bindings
-  db.exec('CREATE INDEX IF NOT EXISTS idx_rg_target_agent ON registered_groups(target_agent_id)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_rg_target_main ON registered_groups(target_main_jid)');
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_rg_target_agent ON registered_groups(target_agent_id)',
+  );
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_rg_target_main ON registered_groups(target_main_jid)',
+  );
 
   // Migration: remove UNIQUE constraint from registered_groups.folder
   // Multiple groups (web:main + feishu chats) share folder='main' by design.
   // The old UNIQUE constraint caused INSERT OR REPLACE to silently delete
   // the conflicting row, making web:main and feishu groups mutually exclusive.
-  const hasUniqueFolder = (
-    db
-      .prepare(
-        `SELECT COUNT(*) as cnt FROM sqlite_master
+  const hasUniqueFolder =
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) as cnt FROM sqlite_master
          WHERE type='index' AND tbl_name='registered_groups'
          AND name='sqlite_autoindex_registered_groups_2'`,
-      )
-      .get() as { cnt: number }
-  ).cnt > 0;
+        )
+        .get() as { cnt: number }
+    ).cnt > 0;
   if (hasUniqueFolder) {
     db.transaction(() => {
       db.exec(`
@@ -526,8 +539,12 @@ export function initDatabase(): void {
   if (curVer && parseInt(curVer, 10) < 17) {
     db.transaction(() => {
       // Check if the old table has single-column PK by inspecting table_info
-      const pkCols = (db.prepare("PRAGMA table_info('sessions')").all() as Array<{ name: string; pk: number }>)
-        .filter(c => c.pk > 0);
+      const pkCols = (
+        db.prepare("PRAGMA table_info('sessions')").all() as Array<{
+          name: string;
+          pk: number;
+        }>
+      ).filter((c) => c.pk > 0);
       // Old schema: single PK column 'group_folder'. New schema: composite PK needs rebuild.
       if (pkCols.length === 1 && pkCols[0].name === 'group_folder') {
         db.exec(`
@@ -727,9 +744,10 @@ export function getTokenUsageStats(
   since.setDate(since.getDate() - days);
   const sinceStr = since.toISOString();
 
-  const jidFilter = chatJids && chatJids.length > 0
-    ? `AND m.chat_jid IN (${chatJids.map(() => '?').join(',')})`
-    : '';
+  const jidFilter =
+    chatJids && chatJids.length > 0
+      ? `AND m.chat_jid IN (${chatJids.map(() => '?').join(',')})`
+      : '';
   const params: unknown[] = [sinceStr, ...(chatJids || [])];
 
   const baseQuery = `
@@ -806,30 +824,45 @@ export function getTokenUsageStats(
   for (const row of rows) {
     if (row.model_usage_json) {
       try {
-        const modelUsage = JSON.parse(row.model_usage_json) as Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
+        const modelUsage = JSON.parse(row.model_usage_json) as Record<
+          string,
+          { inputTokens: number; outputTokens: number; costUSD: number }
+        >;
         for (const [model, usage] of Object.entries(modelUsage)) {
           addToAggregated(
-            row.date, model,
-            usage.inputTokens || 0, usage.outputTokens || 0,
-            0, 0,
+            row.date,
+            model,
+            usage.inputTokens || 0,
+            usage.outputTokens || 0,
+            0,
+            0,
             usage.costUSD || 0,
           );
         }
       } catch (e) {
-        logger.warn({ date: row.date, error: e }, 'Failed to parse model_usage_json');
+        logger.warn(
+          { date: row.date, error: e },
+          'Failed to parse model_usage_json',
+        );
         // fallback: use aggregate fields
         addToAggregated(
-          row.date, 'unknown',
-          row.input_tokens || 0, row.output_tokens || 0,
-          row.cache_read_tokens || 0, row.cache_creation_tokens || 0,
+          row.date,
+          'unknown',
+          row.input_tokens || 0,
+          row.output_tokens || 0,
+          row.cache_read_tokens || 0,
+          row.cache_creation_tokens || 0,
           row.cost_usd || 0,
         );
       }
     } else {
       addToAggregated(
-        row.date, 'unknown',
-        row.input_tokens || 0, row.output_tokens || 0,
-        row.cache_read_tokens || 0, row.cache_creation_tokens || 0,
+        row.date,
+        'unknown',
+        row.input_tokens || 0,
+        row.output_tokens || 0,
+        row.cache_read_tokens || 0,
+        row.cache_creation_tokens || 0,
         row.cost_usd || 0,
       );
     }
@@ -857,12 +890,15 @@ export function getTokenUsageSummary(
   since.setDate(since.getDate() - days);
   const sinceStr = since.toISOString();
 
-  const jidFilter = chatJids && chatJids.length > 0
-    ? `AND chat_jid IN (${chatJids.map(() => '?').join(',')})`
-    : '';
+  const jidFilter =
+    chatJids && chatJids.length > 0
+      ? `AND chat_jid IN (${chatJids.map(() => '?').join(',')})`
+      : '';
   const params: unknown[] = [sinceStr, ...(chatJids || [])];
 
-  const row = db.prepare(`
+  const row = db
+    .prepare(
+      `
     SELECT
       COALESCE(SUM(json_extract(token_usage, '$.inputTokens')), 0) as total_input,
       COALESCE(SUM(json_extract(token_usage, '$.outputTokens')), 0) as total_output,
@@ -874,7 +910,9 @@ export function getTokenUsageSummary(
     FROM messages
     WHERE token_usage IS NOT NULL AND timestamp >= ?
       ${jidFilter}
-  `).get(...params) as {
+  `,
+    )
+    .get(...params) as {
     total_input: number;
     total_output: number;
     total_cache_read: number;
@@ -915,13 +953,16 @@ export function getNewMessages(
 
   const rows = db
     .prepare(sql)
-    .all(cursor.timestamp, cursor.timestamp, cursor.id, ...jids) as NewMessage[];
+    .all(
+      cursor.timestamp,
+      cursor.timestamp,
+      cursor.id,
+      ...jids,
+    ) as NewMessage[];
   const last = rows[rows.length - 1];
   return {
     messages: rows,
-    newCursor: last
-      ? { timestamp: last.timestamp, id: last.id }
-      : cursor,
+    newCursor: last ? { timestamp: last.timestamp, id: last.id } : cursor,
   };
 }
 
@@ -941,7 +982,12 @@ export function getMessagesSince(
   `;
   return db
     .prepare(sql)
-    .all(chatJid, cursor.timestamp, cursor.timestamp, cursor.id) as NewMessage[];
+    .all(
+      chatJid,
+      cursor.timestamp,
+      cursor.timestamp,
+      cursor.id,
+    ) as NewMessage[];
 }
 
 export function createTask(
@@ -1117,10 +1163,12 @@ export function logTaskRun(log: TaskRunLog): void {
 }
 
 export function cleanupOldTaskRunLogs(retentionDays = 30): number {
-  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
-  const result = db.prepare(
-    `DELETE FROM task_run_logs WHERE run_at < ?`,
-  ).run(cutoff);
+  const cutoff = new Date(
+    Date.now() - retentionDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const result = db
+    .prepare(`DELETE FROM task_run_logs WHERE run_at < ?`)
+    .run(cutoff);
   return result.changes;
 }
 
@@ -1141,15 +1189,24 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
-export function getSession(groupFolder: string, agentId?: string | null): string | undefined {
+export function getSession(
+  groupFolder: string,
+  agentId?: string | null,
+): string | undefined {
   const effectiveAgentId = agentId || '';
   const row = db
-    .prepare('SELECT session_id FROM sessions WHERE group_folder = ? AND agent_id = ?')
+    .prepare(
+      'SELECT session_id FROM sessions WHERE group_folder = ? AND agent_id = ?',
+    )
     .get(groupFolder, effectiveAgentId) as { session_id: string } | undefined;
   return row?.session_id;
 }
 
-export function setSession(groupFolder: string, sessionId: string, agentId?: string | null): void {
+export function setSession(
+  groupFolder: string,
+  sessionId: string,
+  agentId?: string | null,
+): void {
   const effectiveAgentId = agentId || '';
   db.prepare(
     `INSERT INTO sessions (group_folder, session_id, agent_id) VALUES (?, ?, ?)
@@ -1157,9 +1214,14 @@ export function setSession(groupFolder: string, sessionId: string, agentId?: str
   ).run(groupFolder, sessionId, effectiveAgentId);
 }
 
-export function deleteSession(groupFolder: string, agentId?: string | null): void {
+export function deleteSession(
+  groupFolder: string,
+  agentId?: string | null,
+): void {
   const effectiveAgentId = agentId || '';
-  db.prepare('DELETE FROM sessions WHERE group_folder = ? AND agent_id = ?').run(groupFolder, effectiveAgentId);
+  db.prepare(
+    'DELETE FROM sessions WHERE group_folder = ? AND agent_id = ?',
+  ).run(groupFolder, effectiveAgentId);
 }
 
 export function deleteAllSessionsForFolder(groupFolder: string): void {
@@ -1168,7 +1230,9 @@ export function deleteAllSessionsForFolder(groupFolder: string): void {
 
 export function getAllSessions(): Record<string, string> {
   const rows = db
-    .prepare("SELECT group_folder, session_id FROM sessions WHERE agent_id = ''")
+    .prepare(
+      "SELECT group_folder, session_id FROM sessions WHERE agent_id = ''",
+    )
     .all() as Array<{ group_folder: string; session_id: string }>;
   const result: Record<string, string> = {};
   for (const row of rows) {
@@ -1179,7 +1243,10 @@ export function getAllSessions(): Record<string, string> {
 
 // --- Registered group accessors ---
 
-function parseExecutionMode(raw: string | null, context: string): ExecutionMode {
+function parseExecutionMode(
+  raw: string | null,
+  context: string,
+): ExecutionMode {
   if (raw === 'container' || raw === 'host') return raw;
   if (raw !== null && raw !== '') {
     console.warn(
@@ -1210,7 +1277,9 @@ type RegisteredGroupRow = {
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
-function parseGroupRow(row: RegisteredGroupRow): RegisteredGroup & { jid: string } {
+function parseGroupRow(
+  row: RegisteredGroupRow,
+): RegisteredGroup & { jid: string } {
   return {
     jid: row.jid,
     name: row.name,
@@ -1225,7 +1294,9 @@ function parseGroupRow(row: RegisteredGroupRow): RegisteredGroup & { jid: string
     initGitUrl: row.init_git_url ?? undefined,
     created_by: row.created_by ?? undefined,
     is_home: row.is_home === 1,
-    selected_skills: row.selected_skills ? JSON.parse(row.selected_skills) : null,
+    selected_skills: row.selected_skills
+      ? JSON.parse(row.selected_skills)
+      : null,
     target_agent_id: row.target_agent_id ?? undefined,
     target_main_jid: row.target_main_jid ?? undefined,
     reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
@@ -1280,7 +1351,9 @@ export function getJidsByFolder(folder: string): string[] {
 }
 
 export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
-  const rows = db.prepare('SELECT * FROM registered_groups').all() as RegisteredGroupRow[];
+  const rows = db
+    .prepare('SELECT * FROM registered_groups')
+    .all() as RegisteredGroupRow[];
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
     result[row.jid] = parseGroupRow(row);
@@ -1292,20 +1365,24 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
  * Get all registered groups that route to a specific conversation agent.
  * Returns array of { jid, group } for each IM group targeting the given agentId.
  */
-export function getGroupsByTargetAgent(agentId: string): Array<{ jid: string; group: RegisteredGroup }> {
-  const rows = db.prepare(
-    'SELECT * FROM registered_groups WHERE target_agent_id = ?',
-  ).all(agentId) as RegisteredGroupRow[];
+export function getGroupsByTargetAgent(
+  agentId: string,
+): Array<{ jid: string; group: RegisteredGroup }> {
+  const rows = db
+    .prepare('SELECT * FROM registered_groups WHERE target_agent_id = ?')
+    .all(agentId) as RegisteredGroupRow[];
   return rows.map((row) => ({ jid: row.jid, group: parseGroupRow(row) }));
 }
 
 /**
  * Get all registered groups that route to a specific workspace's main conversation.
  */
-export function getGroupsByTargetMainJid(webJid: string): Array<{ jid: string; group: RegisteredGroup }> {
-  const rows = db.prepare(
-    'SELECT * FROM registered_groups WHERE target_main_jid = ?',
-  ).all(webJid) as RegisteredGroupRow[];
+export function getGroupsByTargetMainJid(
+  webJid: string,
+): Array<{ jid: string; group: RegisteredGroup }> {
+  const rows = db
+    .prepare('SELECT * FROM registered_groups WHERE target_main_jid = ?')
+    .all(webJid) as RegisteredGroupRow[];
   return rows.map((row) => ({ jid: row.jid, group: parseGroupRow(row) }));
 }
 
@@ -1392,7 +1469,7 @@ export function ensureUserHomeGroup(
     }
   }
 
-  const name = username ? `${username} Home` : (isAdmin ? 'Main' : 'Home');
+  const name = username ? `${username} Home` : isAdmin ? 'Main' : 'Home';
 
   const group: RegisteredGroup = {
     name,
@@ -1413,10 +1490,16 @@ export function ensureUserHomeGroup(
   fs.mkdirSync(userGlobalDir, { recursive: true });
   const userClaudeMd = path.join(userGlobalDir, 'CLAUDE.md');
   if (!fs.existsSync(userClaudeMd)) {
-    const templatePath = path.resolve(process.cwd(), 'config', 'global-claude-md.template.md');
+    const templatePath = path.resolve(
+      process.cwd(),
+      'config',
+      'global-claude-md.template.md',
+    );
     if (fs.existsSync(templatePath)) {
       try {
-        fs.writeFileSync(userClaudeMd, fs.readFileSync(templatePath, 'utf-8'), { flag: 'wx' });
+        fs.writeFileSync(userClaudeMd, fs.readFileSync(templatePath, 'utf-8'), {
+          flag: 'wx',
+        });
       } catch {
         // EEXIST race or read error — ignore
       }
@@ -1440,7 +1523,9 @@ export function deleteGroupData(jid: string, folder: string): void {
     db.prepare(
       'DELETE FROM task_run_logs WHERE task_id IN (SELECT id FROM scheduled_tasks WHERE group_folder = ?)',
     ).run(folder);
-    db.prepare('DELETE FROM scheduled_tasks WHERE group_folder = ?').run(folder);
+    db.prepare('DELETE FROM scheduled_tasks WHERE group_folder = ?').run(
+      folder,
+    );
     // 2. 删除成员记录
     db.prepare('DELETE FROM group_members WHERE group_folder = ?').run(folder);
     // 3. 删除注册信息
@@ -1568,9 +1653,7 @@ export function getMessagesPageMulti(
        ORDER BY timestamp DESC
        LIMIT ?`;
 
-  const params = before
-    ? [...chatJids, before, limit]
-    : [...chatJids, limit];
+  const params = before ? [...chatJids, before, limit] : [...chatJids, limit];
   const rows = db.prepare(sql).all(...params) as Array<
     NewMessage & { is_from_me: number }
   >;
@@ -1601,7 +1684,9 @@ export function getMessagesAfterMulti(
        ORDER BY timestamp ASC
        LIMIT ?`,
     )
-    .all(...chatJids, after, limit) as Array<NewMessage & { is_from_me: number }>;
+    .all(...chatJids, after, limit) as Array<
+    NewMessage & { is_from_me: number }
+  >;
 
   return rows.map((row) => ({
     ...row,
@@ -1660,7 +1745,9 @@ export function getMessagesByTimeRange(
 /**
  * Get all registered groups owned by a specific user.
  */
-export function getGroupsByOwner(userId: string): Array<RegisteredGroup & { jid: string }> {
+export function getGroupsByOwner(
+  userId: string,
+): Array<RegisteredGroup & { jid: string }> {
   const rows = db
     .prepare('SELECT * FROM registered_groups WHERE created_by = ?')
     .all(userId) as Array<{
@@ -1692,7 +1779,9 @@ export function getGroupsByOwner(userId: string): Array<RegisteredGroup & { jid:
     initGitUrl: row.init_git_url ?? undefined,
     created_by: row.created_by ?? undefined,
     is_home: row.is_home === 1,
-    selected_skills: row.selected_skills ? JSON.parse(row.selected_skills) : null,
+    selected_skills: row.selected_skills
+      ? JSON.parse(row.selected_skills)
+      : null,
   }));
 }
 
@@ -1751,8 +1840,7 @@ function mapUserRow(row: Record<string, unknown>): User {
       typeof row.avatar_emoji === 'string' ? row.avatar_emoji : null,
     avatar_color:
       typeof row.avatar_color === 'string' ? row.avatar_color : null,
-    ai_name:
-      typeof row.ai_name === 'string' ? row.ai_name : null,
+    ai_name: typeof row.ai_name === 'string' ? row.ai_name : null,
     ai_avatar_emoji:
       typeof row.ai_avatar_emoji === 'string' ? row.ai_avatar_emoji : null,
     ai_avatar_color:
@@ -1844,14 +1932,16 @@ export type CreateInitialAdminResult =
 export function createInitialAdminUser(
   user: CreateUserInput,
 ): CreateInitialAdminResult {
-  const tx = db.transaction((input: CreateUserInput): CreateInitialAdminResult => {
-    const row = db.prepare('SELECT COUNT(*) as count FROM users').get() as {
-      count: number;
-    };
-    if (row.count > 0) return { ok: false, reason: 'already_initialized' };
-    createUser(input);
-    return { ok: true };
-  });
+  const tx = db.transaction(
+    (input: CreateUserInput): CreateInitialAdminResult => {
+      const row = db.prepare('SELECT COUNT(*) as count FROM users').get() as {
+        count: number;
+      };
+      if (row.count > 0) return { ok: false, reason: 'already_initialized' };
+      createUser(input);
+      return { ok: true };
+    },
+  );
 
   try {
     return tx(user);
@@ -2587,10 +2677,7 @@ export function addGroupMember(
   ).run(groupFolder, userId, role, new Date().toISOString(), addedBy ?? null);
 }
 
-export function removeGroupMember(
-  groupFolder: string,
-  userId: string,
-): void {
+export function removeGroupMember(groupFolder: string, userId: string): void {
   db.prepare(
     'DELETE FROM group_members WHERE group_folder = ? AND user_id = ?',
   ).run(groupFolder, userId);
@@ -2641,9 +2728,7 @@ export function getUserMemberFolders(
   userId: string,
 ): Array<{ group_folder: string; role: 'owner' | 'member' }> {
   const rows = db
-    .prepare(
-      'SELECT group_folder, role FROM group_members WHERE user_id = ?',
-    )
+    .prepare('SELECT group_folder, role FROM group_members WHERE user_id = ?')
     .all(userId) as Array<{ group_folder: string; role: string }>;
   return rows.map((r) => ({
     group_folder: r.group_folder,
@@ -2673,14 +2758,18 @@ export function createAgent(agent: SubAgent): void {
 }
 
 export function getAgent(id: string): SubAgent | undefined {
-  const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as
+    | Record<string, unknown>
+    | undefined;
   if (!row) return undefined;
   return mapAgentRow(row);
 }
 
 export function listAgentsByFolder(folder: string): SubAgent[] {
   const rows = db
-    .prepare('SELECT * FROM agents WHERE group_folder = ? ORDER BY created_at DESC')
+    .prepare(
+      'SELECT * FROM agents WHERE group_folder = ? ORDER BY created_at DESC',
+    )
     .all(folder) as Array<Record<string, unknown>>;
   return rows.map(mapAgentRow);
 }
@@ -2697,42 +2786,59 @@ export function updateAgentStatus(
   status: AgentStatus,
   resultSummary?: string,
 ): void {
-  const completedAt = (status !== 'running' && status !== 'idle') ? new Date().toISOString() : null;
+  const completedAt =
+    status !== 'running' && status !== 'idle' ? new Date().toISOString() : null;
   db.prepare(
     'UPDATE agents SET status = ?, completed_at = ?, result_summary = ? WHERE id = ?',
   ).run(status, completedAt, resultSummary ?? null, id);
 }
 
-export function updateAgentInfo(id: string, name: string, prompt: string): void {
-  db.prepare('UPDATE agents SET name = ?, prompt = ? WHERE id = ?').run(name, prompt, id);
+export function updateAgentInfo(
+  id: string,
+  name: string,
+  prompt: string,
+): void {
+  db.prepare('UPDATE agents SET name = ?, prompt = ? WHERE id = ?').run(
+    name,
+    prompt,
+    id,
+  );
 }
 
 export function deleteCompletedTaskAgents(beforeTimestamp: string): number {
-  const result = db.prepare(
-    "DELETE FROM agents WHERE kind = 'task' AND status IN ('completed', 'error') AND completed_at IS NOT NULL AND completed_at < ?",
-  ).run(beforeTimestamp);
+  const result = db
+    .prepare(
+      "DELETE FROM agents WHERE kind = 'task' AND status IN ('completed', 'error') AND completed_at IS NOT NULL AND completed_at < ?",
+    )
+    .run(beforeTimestamp);
   return result.changes;
 }
 
 export function markRunningTaskAgentsAsError(chatJid: string): number {
   const now = new Date().toISOString();
-  const result = db.prepare(
-    "UPDATE agents SET status = 'error', completed_at = ? WHERE chat_jid = ? AND kind = 'task' AND status = 'running'",
-  ).run(now, chatJid);
+  const result = db
+    .prepare(
+      "UPDATE agents SET status = 'error', completed_at = ? WHERE chat_jid = ? AND kind = 'task' AND status = 'running'",
+    )
+    .run(now, chatJid);
   return result.changes;
 }
 
-export function markAllRunningTaskAgentsAsError(summary = '进程重启，任务中断'): number {
+export function markAllRunningTaskAgentsAsError(
+  summary = '进程重启，任务中断',
+): number {
   const now = new Date().toISOString();
-  const result = db.prepare(
-    "UPDATE agents SET status = 'error', completed_at = ?, result_summary = COALESCE(result_summary, ?) WHERE kind = 'task' AND status = 'running'",
-  ).run(now, summary);
+  const result = db
+    .prepare(
+      "UPDATE agents SET status = 'error', completed_at = ?, result_summary = COALESCE(result_summary, ?) WHERE kind = 'task' AND status = 'running'",
+    )
+    .run(now, summary);
   return result.changes;
 }
 
 export function deleteAgent(id: string): void {
   // Delete associated session
-  db.prepare("DELETE FROM sessions WHERE agent_id = ?").run(id);
+  db.prepare('DELETE FROM sessions WHERE agent_id = ?').run(id);
   db.prepare('DELETE FROM agents WHERE id = ?').run(id);
 }
 
@@ -2747,8 +2853,10 @@ function mapAgentRow(row: Record<string, unknown>): SubAgent {
     kind: (row.kind as AgentKind) || 'task',
     created_by: typeof row.created_by === 'string' ? row.created_by : null,
     created_at: String(row.created_at),
-    completed_at: typeof row.completed_at === 'string' ? row.completed_at : null,
-    result_summary: typeof row.result_summary === 'string' ? row.result_summary : null,
+    completed_at:
+      typeof row.completed_at === 'string' ? row.completed_at : null,
+    result_summary:
+      typeof row.result_summary === 'string' ? row.result_summary : null,
   };
 }
 
@@ -2760,11 +2868,23 @@ export function deleteMessagesForChatJid(chatJid: string): void {
 export function getMessage(
   chatJid: string,
   messageId: string,
-): { id: string; chat_jid: string; sender: string | null; is_from_me: number } | null {
+): {
+  id: string;
+  chat_jid: string;
+  sender: string | null;
+  is_from_me: number;
+} | null {
   const row = db
-    .prepare('SELECT id, chat_jid, sender, is_from_me FROM messages WHERE id = ? AND chat_jid = ?')
+    .prepare(
+      'SELECT id, chat_jid, sender, is_from_me FROM messages WHERE id = ? AND chat_jid = ?',
+    )
     .get(messageId, chatJid) as
-    | { id: string; chat_jid: string; sender: string | null; is_from_me: number }
+    | {
+        id: string;
+        chat_jid: string;
+        sender: string | null;
+        is_from_me: number;
+      }
     | undefined;
   return row ?? null;
 }
@@ -2778,9 +2898,7 @@ export function deleteMessage(chatJid: string, messageId: string): boolean {
 
 export function isGroupShared(groupFolder: string): boolean {
   const row = db
-    .prepare(
-      'SELECT COUNT(*) as cnt FROM group_members WHERE group_folder = ?',
-    )
+    .prepare('SELECT COUNT(*) as cnt FROM group_members WHERE group_folder = ?')
     .get(groupFolder) as { cnt: number };
   return row.cnt > 1;
 }

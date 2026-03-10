@@ -41,7 +41,9 @@ export interface ConnectOptions {
   /** 根据 chatJid 解析群组 folder，用于下载文件/图片到工作区 */
   resolveGroupFolder?: (chatJid: string) => string | undefined;
   /** 将 IM chatJid 解析为绑定目标 JID（conversation agent 或工作区主对话） */
-  resolveEffectiveChatJid?: (chatJid: string) => { effectiveJid: string; agentId: string | null } | null;
+  resolveEffectiveChatJid?: (
+    chatJid: string,
+  ) => { effectiveJid: string; agentId: string | null } | null;
   /** 当 IM 消息被路由到 conversation agent 后调用 */
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   /** Bot 被添加到群聊时调用（自动注册群组） */
@@ -63,8 +65,18 @@ export interface FeishuChatInfo {
 export interface FeishuConnection {
   connect(opts: ConnectOptions): Promise<boolean>;
   stop(): Promise<void>;
-  sendMessage(chatId: string, text: string, localImagePaths?: string[]): Promise<void>;
-  sendImage(chatId: string, imageBuffer: Buffer, mimeType: string, caption?: string, fileName?: string): Promise<void>;
+  sendMessage(
+    chatId: string,
+    text: string,
+    localImagePaths?: string[],
+  ): Promise<void>;
+  sendImage(
+    chatId: string,
+    imageBuffer: Buffer,
+    mimeType: string,
+    caption?: string,
+    fileName?: string,
+  ): Promise<void>;
   sendFile(chatId: string, filePath: string, fileName: string): Promise<void>;
   sendReaction(chatId: string, isTyping: boolean): Promise<void>;
   isConnected(): boolean;
@@ -135,14 +147,20 @@ function extractMessageContent(
       const imageKeys: string[] = [];
       const post = parsed.post;
       if (!post) {
-        logger.warn({ keys: Object.keys(parsed) }, 'Empty post object in post message');
+        logger.warn(
+          { keys: Object.keys(parsed) },
+          'Empty post object in post message',
+        );
         return { text: '' };
       }
 
       // Try zh_cn first, then en_us, then other languages
       const contentData = post.zh_cn || post.en_us || Object.values(post)[0];
       if (!contentData || !Array.isArray(contentData.content)) {
-        logger.warn({ keys: Object.keys(post) }, 'Missing content array in post message');
+        logger.warn(
+          { keys: Object.keys(post) },
+          'Missing content array in post message',
+        );
         return { text: '' };
       }
 
@@ -155,7 +173,9 @@ function extractMessageContent(
         // Handle both array paragraphs and flat object segments
         const segments = Array.isArray(paragraph)
           ? paragraph
-          : (paragraph && typeof paragraph === 'object' ? [paragraph] : null);
+          : paragraph && typeof paragraph === 'object'
+            ? [paragraph]
+            : null;
         if (!segments) continue;
         const parts: string[] = [];
         for (const segment of segments) {
@@ -174,12 +194,18 @@ function extractMessageContent(
                     ? segment.name
                     : '用户';
             parts.push(`@${mentionName}`);
-          } else if (segment.tag === 'img' && typeof segment.image_key === 'string') {
+          } else if (
+            segment.tag === 'img' &&
+            typeof segment.image_key === 'string'
+          ) {
             imageKeys.push(segment.image_key);
             parts.push('[图片]');
           } else if (segment.tag === 'media') {
             parts.push('[视频]');
-          } else if (segment.tag === 'emotion' && typeof segment.emoji_type === 'string') {
+          } else if (
+            segment.tag === 'emotion' &&
+            typeof segment.emoji_type === 'string'
+          ) {
             parts.push(`:${segment.emoji_type}:`);
           } else if (typeof segment.text === 'string') {
             parts.push(segment.text);
@@ -254,12 +280,20 @@ function splitAtParagraphs(text: string, maxLen: number): string[] {
 /**
  * Map file extension to Feishu file type.
  */
-function getFileType(ext: string): 'opus' | 'mp4' | 'pdf' | 'doc' | 'xls' | 'ppt' | 'stream' {
-  const map: Record<string, 'opus' | 'mp4' | 'pdf' | 'doc' | 'xls' | 'ppt' | 'stream'> = {
+function getFileType(
+  ext: string,
+): 'opus' | 'mp4' | 'pdf' | 'doc' | 'xls' | 'ppt' | 'stream' {
+  const map: Record<
+    string,
+    'opus' | 'mp4' | 'pdf' | 'doc' | 'xls' | 'ppt' | 'stream'
+  > = {
     '.pdf': 'pdf',
-    '.doc': 'doc', '.docx': 'doc',
-    '.xls': 'xls', '.xlsx': 'xls',
-    '.ppt': 'ppt', '.pptx': 'ppt',
+    '.doc': 'doc',
+    '.docx': 'doc',
+    '.xls': 'xls',
+    '.xlsx': 'xls',
+    '.ppt': 'ppt',
+    '.pptx': 'ppt',
     '.mp4': 'mp4',
     '.opus': 'opus',
   };
@@ -339,7 +373,9 @@ function buildInteractiveCard(text: string): object {
  * Create an independent Feishu connection instance.
  * Each instance manages its own client, WebSocket, and state maps.
  */
-export function createFeishuConnection(config: FeishuConnectionConfig): FeishuConnection {
+export function createFeishuConnection(
+  config: FeishuConnectionConfig,
+): FeishuConnection {
   // LRU deduplication cache
   const MSG_DEDUP_MAX = 1000;
   const MSG_DEDUP_TTL = 30 * 60 * 1000; // 30min
@@ -460,7 +496,10 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
       }
       const buffer = Buffer.concat(chunks);
       if (buffer.length === 0) {
-        logger.warn({ messageId, fileKey }, 'Empty response from image download');
+        logger.warn(
+          { messageId, fileKey },
+          'Empty response from image download',
+        );
         return null;
       }
 
@@ -470,7 +509,10 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
         mimeType,
       };
     } catch (err) {
-      logger.warn({ err, messageId, fileKey }, 'Failed to download Feishu image');
+      logger.warn(
+        { err, messageId, fileKey },
+        'Failed to download Feishu image',
+      );
       return null;
     }
   }
@@ -503,20 +545,31 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
         const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         totalSize += buf.length;
         if (totalSize > MAX_FILE_SIZE) {
-          logger.warn({ messageId, fileKey, totalSize }, 'File exceeds MAX_FILE_SIZE during download');
+          logger.warn(
+            { messageId, fileKey, totalSize },
+            'File exceeds MAX_FILE_SIZE during download',
+          );
           return null;
         }
         chunks.push(buf);
       }
       const buffer = Buffer.concat(chunks);
       if (buffer.length === 0) {
-        logger.warn({ messageId, fileKey }, 'Empty response from file download');
+        logger.warn(
+          { messageId, fileKey },
+          'Empty response from file download',
+        );
         return null;
       }
 
       const effectiveName = filename || `file_${fileKey}`;
       try {
-        const relPath = await saveDownloadedFile(groupFolder, 'feishu', effectiveName, buffer);
+        const relPath = await saveDownloadedFile(
+          groupFolder,
+          'feishu',
+          effectiveName,
+          buffer,
+        );
         return relPath;
       } catch (err) {
         if (err instanceof FileTooLargeError) {
@@ -526,7 +579,10 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
         throw err;
       }
     } catch (err) {
-      logger.warn({ err, messageId, fileKey }, 'Failed to download Feishu file to disk');
+      logger.warn(
+        { err, messageId, fileKey },
+        'Failed to download Feishu file to disk',
+      );
       return null;
     }
   }
@@ -586,7 +642,15 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
     payload: IncomingMessagePayload,
     source: 'ws' | 'backfill',
   ): Promise<void> {
-    const { onNewChat, ignoreMessagesBefore, onCommand, resolveGroupFolder, resolveEffectiveChatJid, onAgentMessage, shouldProcessGroupMessage } = connectOptions || {};
+    const {
+      onNewChat,
+      ignoreMessagesBefore,
+      onCommand,
+      resolveGroupFolder,
+      resolveEffectiveChatJid,
+      onAgentMessage,
+      shouldProcessGroupMessage,
+    } = connectOptions || {};
     const {
       chatId,
       messageId,
@@ -605,11 +669,22 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
       return;
     }
     markSeen(messageId);
-    logger.info({ messageId, messageType, chatId, source }, 'Feishu message received');
+    logger.info(
+      { messageId, messageType, chatId, source },
+      'Feishu message received',
+    );
 
-    if (ignoreMessagesBefore && createTimeMs > 0 && createTimeMs < ignoreMessagesBefore) {
+    if (
+      ignoreMessagesBefore &&
+      createTimeMs > 0 &&
+      createTimeMs < ignoreMessagesBefore
+    ) {
       logger.info(
-        { messageId, createTime: createTimeMs, threshold: ignoreMessagesBefore },
+        {
+          messageId,
+          createTime: createTimeMs,
+          threshold: ignoreMessagesBefore,
+        },
         'Skipping stale Feishu message from before reconnection',
       );
       return;
@@ -682,7 +757,10 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
             );
             if (relPath) savedPaths.push(relPath);
           } catch (err) {
-            logger.warn({ err, imageKey }, 'Failed to save Feishu image to disk');
+            logger.warn(
+              { err, imageKey },
+              'Failed to save Feishu image to disk',
+            );
           }
         }
       }
@@ -691,27 +769,48 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
         attachmentsJson = JSON.stringify(attachments);
         // 在 content 中添加图片标记 + 磁盘路径，与文件消息保持一致
         // agent 可通过路径直接操作文件，无需从 DB 解码 base64
-        const pathHints = savedPaths.map(p => `[图片: ${p}]`).join('\n');
+        const pathHints = savedPaths.map((p) => `[图片: ${p}]`).join('\n');
         const imgMarker = pathHints || '[图片]';
         text = text ? `${imgMarker}\n${text}` : imgMarker;
       }
     } else if (extracted.fileInfos && extracted.fileInfos.length > 0) {
       // 文件消息：下载到磁盘，路径内联替换
-      logger.info({ chatJid, messageId, messageType, fileCount: extracted.fileInfos.length }, 'Processing Feishu file download');
+      logger.info(
+        {
+          chatJid,
+          messageId,
+          messageType,
+          fileCount: extracted.fileInfos.length,
+        },
+        'Processing Feishu file download',
+      );
       const groupFolder = resolveGroupFolder?.(chatJid);
       if (!groupFolder) {
-        logger.warn({ chatJid }, 'Cannot resolve group folder for file download');
+        logger.warn(
+          { chatJid },
+          'Cannot resolve group folder for file download',
+        );
         for (const fi of extracted.fileInfos) {
-          const placeholder = `[文件: ${fi.filename || fi.fileKey}]`;
-          text = text.replace(placeholder, `[文件下载失败: ${fi.filename || fi.fileKey}]`);
-        }
-      } else {
-        for (const fi of extracted.fileInfos) {
-          const relPath = await downloadFeishuFileToDisk(messageId, fi.fileKey, fi.filename, groupFolder);
           const placeholder = `[文件: ${fi.filename || fi.fileKey}]`;
           text = text.replace(
             placeholder,
-            relPath ? `[文件: ${relPath}]` : `[文件下载失败: ${fi.filename || fi.fileKey}]`,
+            `[文件下载失败: ${fi.filename || fi.fileKey}]`,
+          );
+        }
+      } else {
+        for (const fi of extracted.fileInfos) {
+          const relPath = await downloadFeishuFileToDisk(
+            messageId,
+            fi.fileKey,
+            fi.filename,
+            groupFolder,
+          );
+          const placeholder = `[文件: ${fi.filename || fi.fileKey}]`;
+          text = text.replace(
+            placeholder,
+            relPath
+              ? `[文件: ${relPath}]`
+              : `[文件下载失败: ${fi.filename || fi.fileKey}]`,
           );
         }
       }
@@ -739,21 +838,38 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
     const slashMatch = textForSlash.match(/^\/(\S+)(.*)$/);
     if (slashMatch && onCommand) {
       const cmdBody = (slashMatch[1] + slashMatch[2]).trim();
-      logger.info({ chatJid, cmd: slashMatch[1], cmdBody }, 'Feishu slash command detected');
+      logger.info(
+        { chatJid, cmd: slashMatch[1], cmdBody },
+        'Feishu slash command detected',
+      );
       try {
         const reply = await onCommand(chatJid, cmdBody);
-        logger.info({ chatJid, cmd: slashMatch[1], hasReply: !!reply, replyLen: reply?.length }, 'Feishu slash command processed');
+        logger.info(
+          {
+            chatJid,
+            cmd: slashMatch[1],
+            hasReply: !!reply,
+            replyLen: reply?.length,
+          },
+          'Feishu slash command processed',
+        );
         if (reply) {
           await sendTextToChat(chatId, reply);
           return; // 已知命令，拦截
         }
         // reply 为 null 表示未知命令，继续作为普通消息处理
       } catch (err) {
-        logger.error({ chatJid, cmd: slashMatch[1], err }, 'Feishu slash command failed');
+        logger.error(
+          { chatJid, cmd: slashMatch[1], err },
+          'Feishu slash command failed',
+        );
         try {
           await sendTextToChat(chatId, '⚠️ 命令执行失败，请稍后重试');
         } catch (sendErr) {
-          logger.error({ chatJid, sendErr }, 'Failed to send slash command error feedback');
+          logger.error(
+            { chatJid, sendErr },
+            'Failed to send slash command error feedback',
+          );
         }
         return;
       }
@@ -762,10 +878,13 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
     // ── 群聊 Mention 过滤：require_mention 模式下，bot 未被 @ 则丢弃 ──
     if (chatType === 'group' && shouldProcessGroupMessage) {
       const isBotMentioned = botOpenId
-        ? mentions?.some(m => m.id?.open_id === botOpenId) ?? false
+        ? (mentions?.some((m) => m.id?.open_id === botOpenId) ?? false)
         : true; // 无 bot open_id 时默认放行（安全降级）
       if (!isBotMentioned && !shouldProcessGroupMessage(chatJid)) {
-        logger.debug({ chatJid, messageId }, 'Dropped group message: mention required but bot not mentioned');
+        logger.debug(
+          { chatJid, messageId },
+          'Dropped group message: mention required but bot not mentioned',
+        );
         return;
       }
     }
@@ -788,27 +907,44 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
       undefined,
       chatJid,
     );
-    broadcastNewMessage(targetJid, {
-      id: messageId,
-      chat_jid: targetJid,
-      source_jid: chatJid,
-      sender: senderOpenId,
-      sender_name: resolvedSenderName,
-      content: text,
-      timestamp,
-      attachments: attachmentsJson,
-    }, targetAgentId ?? undefined);
+    broadcastNewMessage(
+      targetJid,
+      {
+        id: messageId,
+        chat_jid: targetJid,
+        source_jid: chatJid,
+        sender: senderOpenId,
+        sender_name: resolvedSenderName,
+        content: text,
+        timestamp,
+        attachments: attachmentsJson,
+      },
+      targetAgentId ?? undefined,
+    );
 
     if (agentRouting && agentRouting.agentId) {
       onAgentMessage?.(chatJid, agentRouting.agentId);
       logger.info(
-        { chatJid, effectiveJid: targetJid, agentId: targetAgentId, sender: resolvedSenderName, messageId, source },
+        {
+          chatJid,
+          effectiveJid: targetJid,
+          agentId: targetAgentId,
+          sender: resolvedSenderName,
+          messageId,
+          source,
+        },
         'Feishu message routed to conversation agent',
       );
     } else if (agentRouting) {
       // Routed to workspace main conversation (no agentId)
       logger.info(
-        { chatJid, effectiveJid: targetJid, sender: resolvedSenderName, messageId, source },
+        {
+          chatJid,
+          effectiveJid: targetJid,
+          sender: resolvedSenderName,
+          messageId,
+          source,
+        },
         'Feishu message routed to workspace main conversation',
       );
     } else {
@@ -819,7 +955,10 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
     }
   }
 
-  async function backfillChatMessages(chatId: string, sinceMs: number): Promise<void> {
+  async function backfillChatMessages(
+    chatId: string,
+    sinceMs: number,
+  ): Promise<void> {
     if (!client) return;
     const nowSec = Math.floor(Date.now() / 1000);
     const startSec = Math.max(0, Math.floor(sinceMs / 1000));
@@ -876,7 +1015,8 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
           return true;
         })
         .map((item) => {
-          const senderOpenId = item.sender?.sender_id?.open_id || item.sender?.id || '';
+          const senderOpenId =
+            item.sender?.sender_id?.open_id || item.sender?.id || '';
           return {
             chatId,
             messageId: item.message_id as string,
@@ -920,7 +1060,10 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
           logger.warn({ err, chatId, reason }, 'Feishu chat backfill failed');
         }
       }
-      logger.info({ reason, chatCount: chatIds.length }, 'Feishu backfill finished');
+      logger.info(
+        { reason, chatCount: chatIds.length },
+        'Feishu backfill finished',
+      );
     } finally {
       backfillRunning = false;
     }
@@ -934,14 +1077,20 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
 
     try {
       if (!eventDispatcher) {
-        logger.warn({ reason }, 'Skip Feishu reconnect: event dispatcher is missing');
+        logger.warn(
+          { reason },
+          'Skip Feishu reconnect: event dispatcher is missing',
+        );
         return;
       }
       if (wsClient) {
         try {
           await wsClient.close();
         } catch (err) {
-          logger.debug({ err }, 'Error closing stale Feishu WS client before reconnect');
+          logger.debug(
+            { err },
+            'Error closing stale Feishu WS client before reconnect',
+          );
         }
       }
 
@@ -984,12 +1133,16 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
 
     if (lastWsStateConnected) {
       disconnectedSince = Date.now();
-      logger.warn({ isConnecting: state.isConnecting }, 'Feishu WebSocket appears offline');
+      logger.warn(
+        { isConnecting: state.isConnecting },
+        'Feishu WebSocket appears offline',
+      );
     }
     lastWsStateConnected = false;
 
     const now = Date.now();
-    const reconnectWindowReady = state.nextConnectTime <= 0 || state.nextConnectTime <= now;
+    const reconnectWindowReady =
+      state.nextConnectTime <= 0 || state.nextConnectTime <= now;
     if (!reconnectWindowReady) return;
 
     disconnectedChecks++;
@@ -1006,9 +1159,7 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
       const { onReady } = opts;
 
       if (!config.appId || !config.appSecret) {
-        logger.warn(
-          'Feishu config is empty, running in Web-only mode',
-        );
+        logger.warn('Feishu config is empty, running in Web-only mode');
         return false;
       }
       connectOptions = opts;
@@ -1034,12 +1185,20 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
         const info = botInfoRes as { data?: { bot?: { open_id?: string } } };
         botOpenId = info?.data?.bot?.open_id || '';
         if (botOpenId) {
-          logger.info({ botOpenId }, 'Fetched bot open_id for mention detection');
+          logger.info(
+            { botOpenId },
+            'Fetched bot open_id for mention detection',
+          );
         } else {
-          logger.warn('Could not fetch bot open_id, mention gating will be bypassed');
+          logger.warn(
+            'Could not fetch bot open_id, mention gating will be bypassed',
+          );
         }
       } catch (err) {
-        logger.warn({ err }, 'Failed to fetch bot info, mention gating will be bypassed');
+        logger.warn(
+          { err },
+          'Failed to fetch bot info, mention gating will be bypassed',
+        );
         botOpenId = '';
       }
 
@@ -1085,7 +1244,10 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
             logger.info({ chatJid }, 'Bot removed from Feishu group');
             connectOptions?.onBotRemovedFromGroup?.(chatJid);
           } catch (err) {
-            logger.error({ err }, 'Error handling bot removed from group event');
+            logger.error(
+              { err },
+              'Error handling bot removed from group event',
+            );
           }
         },
         'im.chat.disbanded_v1': async (data) => {
@@ -1152,7 +1314,11 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
       lastWsStateConnected = false;
     },
 
-    async sendMessage(chatId: string, text: string, localImagePaths?: string[]): Promise<void> {
+    async sendMessage(
+      chatId: string,
+      text: string,
+      localImagePaths?: string[],
+    ): Promise<void> {
       if (!client) {
         logger.warn(
           { chatId },
@@ -1224,15 +1390,18 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
 
         for (const localImagePath of localImagePaths || []) {
           try {
-            const uploadRes = await client.im.v1.image.create({
+            const uploadRes = (await client.im.v1.image.create({
               data: {
                 image_type: 'message',
                 image: fs.createReadStream(localImagePath),
               },
-            }) as { data?: { image_key?: string } } | null;
+            })) as { data?: { image_key?: string } } | null;
             const imageKey = uploadRes?.data?.image_key;
             if (!imageKey) {
-              logger.warn({ chatId, localImagePath }, 'Feishu image upload returned no image_key');
+              logger.warn(
+                { chatId, localImagePath },
+                'Feishu image upload returned no image_key',
+              );
               continue;
             }
             await client.im.v1.message.create({
@@ -1244,7 +1413,10 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
               },
             });
           } catch (imageErr) {
-            logger.warn({ chatId, localImagePath, err: imageErr }, 'Failed to send Feishu image attachment');
+            logger.warn(
+              { chatId, localImagePath, err: imageErr },
+              'Failed to send Feishu image attachment',
+            );
           }
         }
       } catch (err) {
@@ -1253,30 +1425,46 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
       }
     },
 
-    async sendImage(chatId: string, imageBuffer: Buffer, mimeType: string, caption?: string, _fileName?: string /* Feishu image API has no filename field, intentionally unused */): Promise<void> {
+    async sendImage(
+      chatId: string,
+      imageBuffer: Buffer,
+      mimeType: string,
+      caption?: string,
+      _fileName?: string /* Feishu image API has no filename field, intentionally unused */,
+    ): Promise<void> {
       if (!client) {
-        logger.warn({ chatId }, 'Feishu client not initialized, skip sending image');
+        logger.warn(
+          { chatId },
+          'Feishu client not initialized, skip sending image',
+        );
         return;
       }
 
       try {
         // Step 1: Upload image to Feishu to get image_key
-        const uploadResult = await client.im.v1.image.create({
+        const uploadResult = (await client.im.v1.image.create({
           data: {
             image_type: 'message',
             image: imageBuffer,
           },
-        }) as { data?: { image_key?: string } } | null;
+        })) as { data?: { image_key?: string } } | null;
 
         const imageKey = uploadResult?.data?.image_key;
         if (!imageKey) {
-          logger.error({ chatId }, 'Feishu image upload failed: no image_key returned');
-          throw new Error('Feishu image upload failed: no image_key in response');
+          logger.error(
+            { chatId },
+            'Feishu image upload failed: no image_key returned',
+          );
+          throw new Error(
+            'Feishu image upload failed: no image_key in response',
+          );
         }
 
         // Step 2: Send image message
         // receive_id_type: group chat ids start with "oc_", DM open_ids start with "ou_"
-        const receive_id_type = chatId.startsWith('oc_') ? 'chat_id' : 'open_id';
+        const receive_id_type = chatId.startsWith('oc_')
+          ? 'chat_id'
+          : 'open_id';
         const lastMsgId = lastMessageIdByChat.get(chatId);
         const content = JSON.stringify({ image_key: imageKey });
 
@@ -1308,16 +1496,26 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
           });
         }
 
-        logger.info({ chatId, imageKey, mimeType, size: imageBuffer.length }, 'Feishu image sent');
+        logger.info(
+          { chatId, imageKey, mimeType, size: imageBuffer.length },
+          'Feishu image sent',
+        );
       } catch (err) {
         logger.error({ err, chatId, mimeType }, 'Failed to send Feishu image');
         throw err;
       }
     },
 
-    async sendFile(chatId: string, filePath: string, fileName: string): Promise<void> {
+    async sendFile(
+      chatId: string,
+      filePath: string,
+      fileName: string,
+    ): Promise<void> {
       if (!client) {
-        logger.warn({ chatId }, 'Feishu client not initialized, skip sending file');
+        logger.warn(
+          { chatId },
+          'Feishu client not initialized, skip sending file',
+        );
         return;
       }
 
@@ -1327,20 +1525,22 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
         // Check file size limit (30MB)
         const MAX_FILE_SIZE = 30 * 1024 * 1024;
         if (buffer.length > MAX_FILE_SIZE) {
-          throw new Error(`文件大小超过 30MB 限制 (${(buffer.length / 1024 / 1024).toFixed(2)}MB)`);
+          throw new Error(
+            `文件大小超过 30MB 限制 (${(buffer.length / 1024 / 1024).toFixed(2)}MB)`,
+          );
         }
 
         const ext = path.extname(fileName);
         const fileType = getFileType(ext);
 
         // Upload file
-        const uploadResult = await client.im.v1.file.create({
+        const uploadResult = (await client.im.v1.file.create({
           data: {
             file_type: fileType,
             file_name: fileName,
             file: buffer,
           },
-        }) as { data?: { file_key?: string } } | null;
+        })) as { data?: { file_key?: string } } | null;
 
         const fileKey = uploadResult?.data?.file_key;
         if (!fileKey) {
@@ -1348,7 +1548,9 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
         }
 
         // Send file message
-        const receive_id_type = chatId.startsWith('oc_') ? 'chat_id' : 'open_id';
+        const receive_id_type = chatId.startsWith('oc_')
+          ? 'chat_id'
+          : 'open_id';
         await client.im.v1.message.create({
           params: { receive_id_type },
           data: {
@@ -1358,9 +1560,15 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
           },
         });
 
-        logger.info({ chatId, fileName, fileSize: buffer.length }, 'File sent to Feishu');
+        logger.info(
+          { chatId, fileName, fileSize: buffer.length },
+          'File sent to Feishu',
+        );
       } catch (err) {
-        logger.error({ err, chatId, filePath }, 'Failed to send file to Feishu');
+        logger.error(
+          { err, chatId, filePath },
+          'Failed to send file to Feishu',
+        );
         throw err;
       }
     },
@@ -1467,8 +1675,11 @@ export interface ConnectFeishuOptions {
  * @deprecated Use createFeishuConnection() factory instead. Will be replaced by imManager.
  * Connect to Feishu via WebSocket and start receiving messages.
  */
-export async function connectFeishu(opts: ConnectFeishuOptions): Promise<boolean> {
-  const { getFeishuProviderConfigWithSource } = await import('./runtime-config.js');
+export async function connectFeishu(
+  opts: ConnectFeishuOptions,
+): Promise<boolean> {
+  const { getFeishuProviderConfigWithSource } =
+    await import('./runtime-config.js');
   const { config, source } = getFeishuProviderConfigWithSource();
   if (!config.appId || !config.appSecret) {
     logger.warn(
