@@ -537,7 +537,7 @@ scripts/                      # 构建辅助脚本
 | `/status` | - | 查看当前所在的工作区/对话状态 |
 | `/recall` | `/rc` | 调用 Claude CLI（`--print` 模式）总结最近 10 条消息，API 不可用时 fallback 到原始消息列表 |
 | `/clear` | - | 清除当前对话的会话上下文 |
-| `/activation` | - | 切换群聊响应模式：`/activation always`（全量响应）或 `/activation mention`（需要 @机器人） |
+| `/require_mention` | - | 切换群聊响应模式：`/require_mention true`（需要 @机器人）或 `/require_mention false`（全量响应） |
 
 `/recall` 通过 `execFile('claude', ['--print'])` + stdin 管道调用 Claude CLI，复用与 Agent Runner 相同的 OAuth 认证机制。
 
@@ -547,12 +547,12 @@ scripts/                      # 构建辅助脚本
 
 - **默认模式**（`require_mention=true`）：群聊中只有 @机器人 的消息才会被处理
 - **全量模式**（`require_mention=false`）：群聊中所有消息都会被处理
-- 通过 `/activation always|mention` 命令切换
+- 通过 `/require_mention true|false` 命令切换
 - 私聊不受此控制影响，始终响应
 
 **实现原理**：连接飞书时通过 Bot Info API 获取 bot 的 `open_id`，收到群消息后检查 `mentions[].id.open_id` 是否包含 bot。如果 bot 未被 @mention 且该群 `require_mention=true`，则静默丢弃该消息。
 
-**前置条件**：飞书应用需要 `im:message:readonly` 权限（接收群里所有消息），否则平台层只推送 @消息，应用层控制无意义。
+**前置条件**：飞书应用需要 `im:message.group_msg` 敏感权限（实时接收群里所有消息）。`im:message:readonly` 仅控制 REST API 读取历史消息，不影响 WebSocket 实时推送。没有 `im:message.group_msg` 权限时，平台层只推送 @消息，`require_mention=false` 无法生效。
 
 ## 9. 环境变量
 

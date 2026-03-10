@@ -476,8 +476,8 @@ async function handleCommand(
       return handleBindCommand(chatJid, rawArgs);
     case 'new':
       return handleNewCommand(chatJid, rawArgs);
-    case 'activation':
-      return handleActivationCommand(chatJid, rawArgs);
+    case 'require_mention':
+      return handleRequireMentionCommand(chatJid, rawArgs);
     default:
       return null;
   }
@@ -808,26 +808,26 @@ function handleNewCommand(chatJid: string, rawName: string): string {
   return `工作区「${name}」已创建并绑定\n📁 ${folder}\n🔁 回复策略: source_only\n\n发送 /unbind 可解绑回默认工作区`;
 }
 
-function handleActivationCommand(chatJid: string, rawArgs: string): string {
+function handleRequireMentionCommand(chatJid: string, rawArgs: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '未找到当前会话';
 
   const action = rawArgs.trim().toLowerCase();
-  if (action === 'always') {
-    const updated: RegisteredGroup = { ...group, require_mention: false };
-    setRegisteredGroup(chatJid, updated);
-    registeredGroups[chatJid] = updated;
-    return '已切换为「全量响应」模式：群聊中所有消息都会响应，无需 @机器人';
-  } else if (action === 'mention') {
+  if (action === 'true') {
     const updated: RegisteredGroup = { ...group, require_mention: true };
     setRegisteredGroup(chatJid, updated);
     registeredGroups[chatJid] = updated;
-    return '已切换为「@提及」模式：群聊中需要 @机器人 才会响应';
+    return '已开启：群聊中需要 @机器人 才会响应';
+  } else if (action === 'false') {
+    const updated: RegisteredGroup = { ...group, require_mention: false };
+    setRegisteredGroup(chatJid, updated);
+    registeredGroups[chatJid] = updated;
+    return '已关闭：群聊中所有消息都会响应，无需 @机器人';
   } else if (!action) {
-    const mode = group.require_mention !== false ? '@提及' : '全量响应';
-    return `当前模式: ${mode}\n\n用法:\n/activation always — 全量响应（无需 @）\n/activation mention — 需要 @机器人`;
+    const current = group.require_mention !== false;
+    return `当前 require_mention: ${current}\n\n用法:\n/require_mention true — 需要 @机器人\n/require_mention false — 全量响应`;
   }
-  return '用法: /activation always|mention';
+  return '用法: /require_mention true|false';
 }
 
 const recallCooldowns = new Map<string, number>();
