@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronDown, ChevronUp, Wrench, Sparkles, Link, Info } from 'lucide-react';
 import { useChatStore, StreamingTimelineEvent } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { EmojiAvatar } from '../common/EmojiAvatar';
@@ -57,51 +57,28 @@ function AskUserQuestionCard({ toolInput }: { toolInput: Record<string, unknown>
 function TimelineEventItem({ item }: { item: StreamingTimelineEvent }) {
   const isCompleted = item.text.startsWith('✓');
 
-  const toolIcon = (
-    <svg className="w-3 h-3 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
-    </svg>
-  );
-  const skillIcon = (
-    <svg className="w-3 h-3 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-    </svg>
-  );
-  const hookIcon = (
-    <svg className="w-3 h-3 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-    </svg>
-  );
-  const statusIcon = (
-    <svg className="w-3 h-3 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="12" cy="12" r="10" />
-      <line x1="12" y1="8" x2="12" y2="12" />
-      <line x1="12" y1="16" x2="12.01" y2="16" />
-    </svg>
-  );
-
   type StyleConfig = { icon: React.ReactNode; colorClass: string; bgClass: string; borderClass: string };
   const styles: Record<StreamingTimelineEvent['kind'], StyleConfig> = {
     tool: {
-      icon: toolIcon,
+      icon: <Wrench className="w-3 h-3 flex-shrink-0 mt-0.5" />,
       colorClass: isCompleted ? 'text-green-700' : 'text-slate-600',
       bgClass: isCompleted ? 'bg-green-50' : 'bg-slate-50',
       borderClass: isCompleted ? 'border-green-200' : 'border-slate-200',
     },
     skill: {
-      icon: skillIcon,
+      icon: <Sparkles className="w-3 h-3 flex-shrink-0 mt-0.5" />,
       colorClass: isCompleted ? 'text-blue-700' : 'text-blue-600',
       bgClass: isCompleted ? 'bg-blue-50' : 'bg-blue-50/60',
       borderClass: isCompleted ? 'border-blue-200' : 'border-blue-100',
     },
     hook: {
-      icon: hookIcon,
+      icon: <Link className="w-3 h-3 flex-shrink-0 mt-0.5" />,
       colorClass: 'text-purple-700',
       bgClass: 'bg-purple-50',
       borderClass: 'border-purple-200',
     },
     status: {
-      icon: statusIcon,
+      icon: <Info className="w-3 h-3 flex-shrink-0 mt-0.5" />,
       colorClass: 'text-amber-700',
       bgClass: 'bg-amber-50',
       borderClass: 'border-amber-200',
