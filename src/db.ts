@@ -320,6 +320,8 @@ export function initDatabase(): void {
     "TEXT DEFAULT 'source_only'",
   );
   ensureColumn('registered_groups', 'require_mention', 'INTEGER DEFAULT 0');
+  ensureColumn('registered_groups', 'mcp_mode', "TEXT DEFAULT 'inherit'");
+  ensureColumn('registered_groups', 'selected_mcps', 'TEXT');
   ensureColumn(
     'registered_groups',
     'activation_mode',
@@ -1312,6 +1314,8 @@ type RegisteredGroupRow = {
   reply_policy: string | null;
   require_mention: number;
   activation_mode: string | null;
+  mcp_mode: string | null;
+  selected_mcps: string | null;
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
@@ -1340,6 +1344,8 @@ function parseGroupRow(
     reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
     require_mention: row.require_mention === 1,
     activation_mode: parseActivationMode(row.activation_mode),
+    mcp_mode: row.mcp_mode === 'custom' ? 'custom' : 'inherit',
+    selected_mcps: row.selected_mcps ? JSON.parse(row.selected_mcps) : null,
   };
 }
 
@@ -1370,8 +1376,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -1390,6 +1396,8 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.reply_policy ?? 'source_only',
     group.require_mention === true ? 1 : 0,
     group.activation_mode ?? 'auto',
+    group.mcp_mode ?? 'inherit',
+    group.selected_mcps ? JSON.stringify(group.selected_mcps) : null,
   );
 }
 

@@ -27,6 +27,7 @@ import {
   shellQuoteEnvLines,
   writeCredentialsFile,
 } from './runtime-config.js';
+import { resolveGroupMcpServers } from './mcp-utils.js';
 import { RegisteredGroup, StreamEvent } from './types.js';
 import {
   attachStderrHandler,
@@ -89,66 +90,6 @@ function ensureSettingsJson(
   fs.writeFileSync(settingsFile, newContent, { mode: 0o644 });
 }
 
-/**
- * Load enabled MCP server configs for a user.
- * Reads data/mcp-servers/{userId}/servers.json and returns only enabled servers
- * with fields needed for settings.json. Supports both stdio (command/args/env)
- * and http/sse (type/url/headers) server types.
- */
-function loadUserMcpServers(
-  userId: string,
-): Record<string, Record<string, unknown>> {
-  const serversFile = path.join(
-    DATA_DIR,
-    'mcp-servers',
-    userId,
-    'servers.json',
-  );
-  try {
-    if (!fs.existsSync(serversFile)) return {};
-    const file = JSON.parse(fs.readFileSync(serversFile, 'utf8')) as {
-      servers?: Record<string, Record<string, unknown>>;
-    };
-    const raw = file.servers || {};
-    const result: Record<string, Record<string, unknown>> = {};
-    for (const [name, server] of Object.entries(raw)) {
-      if (!server.enabled) continue;
-
-      const isHttpType = server.type === 'http' || server.type === 'sse';
-
-      if (isHttpType) {
-        if (!server.url) continue;
-        const entry: Record<string, unknown> = {
-          type: server.type,
-          url: server.url,
-        };
-        if (
-          server.headers &&
-          typeof server.headers === 'object' &&
-          Object.keys(server.headers as object).length > 0
-        ) {
-          entry.headers = server.headers;
-        }
-        result[name] = entry;
-      } else {
-        if (!server.command) continue;
-        const entry: Record<string, unknown> = { command: server.command };
-        if (server.args) entry.args = server.args;
-        if (
-          server.env &&
-          typeof server.env === 'object' &&
-          Object.keys(server.env as object).length > 0
-        ) {
-          entry.env = server.env;
-        }
-        result[name] = entry;
-      }
-    }
-    return result;
-  } catch {
-    return {};
-  }
-}
 
 export interface ContainerInput {
   prompt: string;
@@ -275,12 +216,7 @@ function buildVolumeMounts(
     : path.join(DATA_DIR, 'sessions', group.folder, '.claude');
   mkdirForContainer(groupSessionsDir);
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  // Only load user-configured MCP servers for home containers.
-  // Non-home (flow) containers get a clean context with just the built-in happyclaw MCP,
-  // preventing MCP tool descriptions (e.g., 12 McDonald's tools) from overwhelming
-  // the Agent's context and causing hallucinations on short user messages.
-  const mcpServers =
-    group.is_home && ownerId ? loadUserMcpServers(ownerId) : {};
+  const mcpServers = resolveGroupMcpServers(group, ownerId);
   ensureSettingsJson(settingsFile, mcpServers);
 
   mounts.push({
@@ -873,12 +809,9 @@ export async function runHostAgent(
   fs.mkdirSync(groupSessionsDir, { recursive: true });
 
   // 3. 写入 settings.json（合并模式，不覆盖已有用户配置）
-  // Only load user-configured MCP servers for home containers (same logic as Docker mode).
+  // Resolve MCP servers based on group's mcp_mode (same logic as Docker mode).
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  const hostMcpServers =
-    group.is_home && group.created_by
-      ? loadUserMcpServers(group.created_by)
-      : {};
+  const hostMcpServers = resolveGroupMcpServers(group, group.created_by);
   ensureSettingsJson(settingsFile, hostMcpServers);
 
   // 4. Skills 自动链接到 session 目录
