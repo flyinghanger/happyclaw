@@ -311,7 +311,13 @@ export type WsMessageOut =
   | {
       type: 'runner_state';
       chatJid: string;
-      state: 'idle' | 'running' | 'interrupting' | 'interrupted' | 'closing' | 'error';
+      state:
+        | 'idle'
+        | 'running'
+        | 'interrupting'
+        | 'interrupted'
+        | 'closing'
+        | 'error';
       agentId?: string;
       detail?: string;
     }

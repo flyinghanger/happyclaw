@@ -5,7 +5,12 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { deleteSession, getJidsByFolder, storeMessageDirect, ensureChatExists } from './db.js';
+import {
+  deleteSession,
+  getJidsByFolder,
+  storeMessageDirect,
+  ensureChatExists,
+} from './db.js';
 import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
 import type { NewMessage, MessageCursor } from './types.js';
@@ -34,7 +39,10 @@ function clearSessionFiles(folder: string, agentId?: string): void {
     try {
       fs.rmSync(path.join(claudeDir, entry), { recursive: true, force: true });
     } catch (err) {
-      logger.warn({ entry, folder, agentId, err }, 'Failed to remove session file, skipping');
+      logger.warn(
+        { entry, folder, agentId, err },
+        'Failed to remove session file, skipping',
+      );
     }
   }
 }
@@ -54,7 +62,9 @@ export async function executeSessionReset(
   } else {
     // Main session reset: stop all processes for this folder
     const siblingJids = getJidsByFolder(folder);
-    await Promise.all(siblingJids.map((j) => deps.queue.stopGroup(j, { force: true })));
+    await Promise.all(
+      siblingJids.map((j) => deps.queue.stopGroup(j, { force: true })),
+    );
   }
 
   // 2. Clear .claude/ session files (preserve settings.json)
@@ -99,7 +109,10 @@ export async function executeSessionReset(
   } else {
     const siblingJids = getJidsByFolder(folder);
     for (const siblingJid of siblingJids) {
-      deps.setLastAgentTimestamp(siblingJid, { timestamp, id: dividerMessageId });
+      deps.setLastAgentTimestamp(siblingJid, {
+        timestamp,
+        id: dividerMessageId,
+      });
     }
   }
 

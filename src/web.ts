@@ -439,12 +439,16 @@ async function handleAgentConversationMessage(
 // --- Static Files ---
 
 // 带 content hash 的静态资源：长期不可变缓存
-app.use('/assets/*', async (c, next) => {
-  await next();
-  if (c.res.status === 200) {
-    c.res.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
-  }
-}, serveStatic({ root: './web/dist' }));
+app.use(
+  '/assets/*',
+  async (c, next) => {
+    await next();
+    if (c.res.status === 200) {
+      c.res.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  },
+  serveStatic({ root: './web/dist' }),
+);
 
 // SPA fallback：index.html / sw.js 等必须每次验证
 app.use(
@@ -454,8 +458,16 @@ app.use(
     if (c.res.status === 200) {
       const p = c.req.path;
       // 非文件扩展名路径（SPA fallback → index.html）、SW 脚本、manifest 禁止缓存
-      if (!p.match(/\.\w+$/) || p === '/sw.js' || p === '/registerSW.js' || p === '/manifest.webmanifest') {
-        c.res.headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      if (
+        !p.match(/\.\w+$/) ||
+        p === '/sw.js' ||
+        p === '/registerSW.js' ||
+        p === '/manifest.webmanifest'
+      ) {
+        c.res.headers.set(
+          'Cache-Control',
+          'no-cache, no-store, must-revalidate',
+        );
       }
     }
   },

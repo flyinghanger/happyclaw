@@ -125,6 +125,7 @@ export interface ClaudeThirdPartyProfile {
   anthropicAuthToken: string;
   happyclawModel: string;
   updatedAt: string | null;
+  customEnv: Record<string, string>;
 }
 
 export interface ClaudeThirdPartyProfilePublic {
@@ -135,6 +136,7 @@ export interface ClaudeThirdPartyProfilePublic {
   updatedAt: string | null;
   hasAnthropicAuthToken: boolean;
   anthropicAuthTokenMasked: string | null;
+  customEnv: Record<string, string>;
 }
 
 export interface FeishuProviderConfig {
@@ -224,6 +226,7 @@ interface StoredClaudeThirdPartyProfileV1 {
   happyclawModel: string;
   updatedAt: string;
   secrets: EncryptedSecrets;
+  customEnv?: Record<string, string>;
 }
 
 interface StoredClaudeProviderConfigV3 {
@@ -233,6 +236,7 @@ interface StoredClaudeProviderConfigV3 {
   official: {
     updatedAt: string;
     secrets: EncryptedSecrets;
+    customEnv?: Record<string, string>;
   };
 }
 
@@ -249,6 +253,7 @@ interface ClaudeStoredStateV3Resolved {
   profiles: StoredClaudeThirdPartyProfileV1[];
   officialSecrets: SecretPayload;
   officialUpdatedAt: string | null;
+  officialCustomEnv: Record<string, string>;
 }
 
 interface ClaudeStoredProfileResolved {
@@ -568,6 +573,9 @@ function readLegacyConfig(
 function toStoredProfile(
   profile: ClaudeThirdPartyProfile,
 ): StoredClaudeThirdPartyProfileV1 {
+  const sanitizedEnv = sanitizeCustomEnvMap(profile.customEnv || {}, {
+    skipReservedClaudeKeys: true,
+  });
   return {
     id: normalizeProfileId(profile.id),
     name: normalizeProfileName(profile.name),
@@ -583,6 +591,9 @@ function toStoredProfile(
       claudeCodeOauthToken: '',
       claudeOAuthCredentials: null,
     }),
+    ...(Object.keys(sanitizedEnv).length > 0
+      ? { customEnv: sanitizedEnv }
+      : {}),
   };
 }
 
@@ -597,6 +608,9 @@ function fromStoredProfile(
     anthropicAuthToken: secrets.anthropicAuthToken,
     happyclawModel: normalizeModel(stored.happyclawModel ?? ''),
     updatedAt: stored.updatedAt || null,
+    customEnv: sanitizeCustomEnvMap(stored.customEnv || {}, {
+      skipReservedClaudeKeys: true,
+    }),
   };
 }
 
@@ -612,6 +626,7 @@ function makeDefaultThirdPartyProfile(
       config.happyclawModel || process.env.HAPPYCLAW_MODEL || '',
     ),
     updatedAt: config.updatedAt || new Date().toISOString(),
+    customEnv: {},
   };
 }
 
@@ -661,6 +676,47 @@ function normalizeStoredState(
 
   const officialSecrets = normalizeOfficialSecrets(state.officialSecrets);
   const officialMode = isOfficialClaudeMode(state.activeProfileId);
+  let officialCustomEnv = sanitizeCustomEnvMap(state.officialCustomEnv || {}, {
+    skipReservedClaudeKeys: true,
+  });
+
+  // Lazy migration: if all profiles have empty customEnv, migrate from legacy global file
+  const allEmpty =
+    Object.keys(officialCustomEnv).length === 0 &&
+    normalizedProfiles.every(
+      (p) => !p.customEnv || Object.keys(p.customEnv).length === 0,
+    );
+  if (allEmpty) {
+    try {
+      if (fs.existsSync(CLAUDE_CUSTOM_ENV_FILE)) {
+        const parsed = JSON.parse(
+          fs.readFileSync(CLAUDE_CUSTOM_ENV_FILE, 'utf-8'),
+        ) as { customEnv?: Record<string, string> };
+        const legacyEnv = sanitizeCustomEnvMap(parsed.customEnv || {}, {
+          skipReservedClaudeKeys: true,
+        });
+        if (Object.keys(legacyEnv).length > 0) {
+          if (officialMode) {
+            officialCustomEnv = legacyEnv;
+          } else {
+            // Assign to the active profile
+            const activeIdx = normalizedProfiles.findIndex(
+              (p) => p.id === state.activeProfileId,
+            );
+            if (activeIdx >= 0) {
+              normalizedProfiles[activeIdx] = {
+                ...normalizedProfiles[activeIdx],
+                customEnv: legacyEnv,
+              };
+            }
+          }
+          logger.info('Migrated legacy global customEnv to active profile');
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to migrate legacy global customEnv');
+    }
+  }
 
   if (normalizedProfiles.length === 0) {
     if (officialMode) {
@@ -669,6 +725,7 @@ function normalizeStoredState(
         profiles: [],
         officialSecrets,
         officialUpdatedAt: state.officialUpdatedAt,
+        officialCustomEnv,
       };
     }
 
@@ -688,6 +745,7 @@ function normalizeStoredState(
       profiles: [defaultProfile],
       officialSecrets,
       officialUpdatedAt: state.officialUpdatedAt,
+      officialCustomEnv,
     };
   }
 
@@ -705,6 +763,7 @@ function normalizeStoredState(
     profiles: normalizedProfiles,
     officialSecrets,
     officialUpdatedAt: state.officialUpdatedAt,
+    officialCustomEnv,
   };
 }
 
@@ -735,6 +794,7 @@ function readStoredState(): ClaudeStoredStateV3Resolved | null {
         profiles: profiles as StoredClaudeThirdPartyProfileV1[],
         officialSecrets,
         officialUpdatedAt: v3.official?.updatedAt || null,
+        officialCustomEnv: v3.official?.customEnv || {},
       });
     }
 
@@ -765,6 +825,7 @@ function readStoredState(): ClaudeStoredStateV3Resolved | null {
           claudeOAuthCredentials: legacyConfig.claudeOAuthCredentials,
         },
         officialUpdatedAt: legacyConfig.updatedAt,
+        officialCustomEnv: {},
       });
     }
 
@@ -780,6 +841,7 @@ function readStoredState(): ClaudeStoredStateV3Resolved | null {
         claudeOAuthCredentials: legacy.claudeOAuthCredentials,
       },
       officialUpdatedAt: legacy.updatedAt,
+      officialCustomEnv: {},
     });
   } catch (err) {
     logger.error(
@@ -805,6 +867,9 @@ function writeStoredState(state: ClaudeStoredStateV3Resolved): void {
         claudeOAuthCredentials:
           normalized.officialSecrets.claudeOAuthCredentials,
       }),
+      ...(Object.keys(normalized.officialCustomEnv || {}).length > 0
+        ? { customEnv: normalized.officialCustomEnv }
+        : {}),
     },
   };
 
@@ -1124,43 +1189,6 @@ export function toPublicTelegramProviderConfig(
   };
 }
 
-export function getGlobalClaudeCustomEnv(): Record<string, string> {
-  try {
-    if (!fs.existsSync(CLAUDE_CUSTOM_ENV_FILE)) return {};
-    const parsed = JSON.parse(
-      fs.readFileSync(CLAUDE_CUSTOM_ENV_FILE, 'utf-8'),
-    ) as {
-      customEnv?: Record<string, string>;
-    };
-    return sanitizeCustomEnvMap(parsed.customEnv || {}, {
-      skipReservedClaudeKeys: true,
-    });
-  } catch (err) {
-    logger.warn(
-      { err },
-      'Failed to read global Claude custom env, returning empty',
-    );
-    return {};
-  }
-}
-
-export function saveGlobalClaudeCustomEnv(
-  customEnv: Record<string, string>,
-): Record<string, string> {
-  const sanitized = sanitizeCustomEnvMap(customEnv, {
-    skipReservedClaudeKeys: true,
-  });
-  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
-  const tmp = `${CLAUDE_CUSTOM_ENV_FILE}.tmp`;
-  fs.writeFileSync(
-    tmp,
-    JSON.stringify({ customEnv: sanitized }, null, 2) + '\n',
-    'utf-8',
-  );
-  fs.renameSync(tmp, CLAUDE_CUSTOM_ENV_FILE);
-  return sanitized;
-}
-
 function maskSecret(value: string): string | null {
   if (!value) return null;
   if (value.length <= 8)
@@ -1264,6 +1292,7 @@ export function saveClaudeProviderConfig(
       claudeOAuthCredentials: null,
     },
     officialUpdatedAt: normalized.updatedAt,
+    officialCustomEnv: {},
   };
 
   if (mode === 'official') {
@@ -1323,6 +1352,7 @@ export function saveClaudeProviderConfig(
       claudeOAuthCredentials: normalized.claudeOAuthCredentials,
     }),
     officialUpdatedAt: normalized.updatedAt,
+    officialCustomEnv: baseState.officialCustomEnv,
   });
 
   return normalized;
@@ -1354,6 +1384,7 @@ export function saveClaudeOfficialProviderSecrets(
       claudeOAuthCredentials: null,
     },
     officialUpdatedAt: null,
+    officialCustomEnv: {},
   };
 
   writeStoredState({
@@ -1399,6 +1430,7 @@ export function toPublicClaudeThirdPartyProfile(
     updatedAt: profile.updatedAt,
     hasAnthropicAuthToken: !!profile.anthropicAuthToken,
     anthropicAuthTokenMasked: maskSecret(profile.anthropicAuthToken),
+    customEnv: profile.customEnv || {},
   };
 }
 
@@ -1411,6 +1443,7 @@ export function createClaudeThirdPartyProfile(input: {
   anthropicBaseUrl: string;
   anthropicAuthToken: string;
   happyclawModel?: string;
+  customEnv?: Record<string, string>;
 }): ClaudeThirdPartyProfile {
   const state = readStoredState() || {
     activeProfileId: DEFAULT_THIRD_PARTY_PROFILE_ID,
@@ -1422,6 +1455,7 @@ export function createClaudeThirdPartyProfile(input: {
       claudeOAuthCredentials: null,
     },
     officialUpdatedAt: null,
+    officialCustomEnv: {},
   };
 
   if (state.profiles.length >= MAX_THIRD_PARTY_PROFILES) {
@@ -1439,6 +1473,9 @@ export function createClaudeThirdPartyProfile(input: {
     ),
     happyclawModel: normalizeModel(input.happyclawModel ?? ''),
     updatedAt: now,
+    customEnv: sanitizeCustomEnvMap(input.customEnv || {}, {
+      skipReservedClaudeKeys: true,
+    }),
   };
 
   const merged = buildConfig(
@@ -1474,6 +1511,7 @@ export function updateClaudeThirdPartyProfile(
     name?: string;
     anthropicBaseUrl?: string;
     happyclawModel?: string;
+    customEnv?: Record<string, string>;
   },
 ): ClaudeThirdPartyProfile {
   const state = readStoredState();
@@ -1498,6 +1536,12 @@ export function updateClaudeThirdPartyProfile(
       patch.happyclawModel !== undefined
         ? normalizeModel(patch.happyclawModel)
         : decoded.happyclawModel,
+    customEnv:
+      patch.customEnv !== undefined
+        ? sanitizeCustomEnvMap(patch.customEnv, {
+            skipReservedClaudeKeys: true,
+          })
+        : decoded.customEnv,
     updatedAt: new Date().toISOString(),
   };
 
@@ -1678,13 +1722,48 @@ export function buildClaudeEnvLines(config: ClaudeProviderConfig): string[] {
     lines.push(`HAPPYCLAW_MODEL=${sanitizeEnvValue(config.happyclawModel)}`);
   }
 
-  const customEnv = getGlobalClaudeCustomEnv();
+  const customEnv = getActiveProfileCustomEnv();
   for (const [key, value] of Object.entries(customEnv)) {
     if (RESERVED_CLAUDE_ENV_KEYS.has(key)) continue;
     lines.push(`${key}=${sanitizeEnvValue(value)}`);
   }
 
   return lines;
+}
+
+export function getActiveProfileCustomEnv(): Record<string, string> {
+  const state = readStoredState();
+  if (!state) return {};
+
+  if (isOfficialClaudeMode(state.activeProfileId)) {
+    return sanitizeCustomEnvMap(state.officialCustomEnv || {}, {
+      skipReservedClaudeKeys: true,
+    });
+  }
+
+  const active =
+    state.profiles.find((item) => item.id === state.activeProfileId) ||
+    state.profiles[0];
+  if (!active) return {};
+
+  return sanitizeCustomEnvMap(active.customEnv || {}, {
+    skipReservedClaudeKeys: true,
+  });
+}
+
+export function saveOfficialCustomEnv(
+  customEnv: Record<string, string>,
+): Record<string, string> {
+  const sanitized = sanitizeCustomEnvMap(customEnv, {
+    skipReservedClaudeKeys: true,
+  });
+  const state = readStoredState();
+  if (!state) throw new Error('Claude 配置不存在');
+  writeStoredState({
+    ...state,
+    officialCustomEnv: sanitized,
+  });
+  return sanitized;
 }
 
 export function appendClaudeConfigAudit(
@@ -2288,6 +2367,25 @@ export interface UserTelegramConfig {
   updatedAt: string | null;
 }
 
+export interface UserQQConfig {
+  appId: string;
+  appSecret: string;
+  enabled?: boolean;
+  updatedAt: string | null;
+}
+
+interface StoredQQProviderConfigV1 {
+  version: 1;
+  appId: string;
+  enabled?: boolean;
+  updatedAt: string;
+  secret: EncryptedSecrets;
+}
+
+interface QQSecretPayload {
+  appSecret: string;
+}
+
 function userImDir(userId: string): string {
   if (!/^[a-zA-Z0-9_-]+$/.test(userId)) {
     throw new Error('Invalid userId');
@@ -2388,6 +2486,93 @@ export function saveUserTelegramConfig(
   const dir = userImDir(userId);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, 'telegram.json');
+  const tmp = `${filePath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, filePath);
+  return normalized;
+}
+
+// ========== QQ User IM Config ==========
+
+function encryptQQSecret(payload: QQSecretPayload): EncryptedSecrets {
+  const key = getOrCreateEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+
+  const plaintext = Buffer.from(JSON.stringify(payload), 'utf-8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return {
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    data: encrypted.toString('base64'),
+  };
+}
+
+function decryptQQSecret(secrets: EncryptedSecrets): QQSecretPayload {
+  const key = getOrCreateEncryptionKey();
+  const iv = Buffer.from(secrets.iv, 'base64');
+  const tag = Buffer.from(secrets.tag, 'base64');
+  const encrypted = Buffer.from(secrets.data, 'base64');
+
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+
+  const decrypted = Buffer.concat([
+    decipher.update(encrypted),
+    decipher.final(),
+  ]).toString('utf-8');
+  const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+  return {
+    appSecret: normalizeSecret(parsed.appSecret ?? '', 'appSecret'),
+  };
+}
+
+export function getUserQQConfig(userId: string): UserQQConfig | null {
+  const filePath = path.join(userImDir(userId), 'qq.json');
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    if (parsed.version !== 1) return null;
+
+    const stored = parsed as unknown as StoredQQProviderConfigV1;
+    const secret = decryptQQSecret(stored.secret);
+    return {
+      appId: normalizeFeishuAppId(stored.appId ?? ''),
+      appSecret: secret.appSecret,
+      enabled: stored.enabled,
+      updatedAt: stored.updatedAt || null,
+    };
+  } catch (err) {
+    logger.warn({ err, userId }, 'Failed to read user QQ config');
+    return null;
+  }
+}
+
+export function saveUserQQConfig(
+  userId: string,
+  next: Omit<UserQQConfig, 'updatedAt'>,
+): UserQQConfig {
+  const normalized: UserQQConfig = {
+    appId: normalizeFeishuAppId(next.appId),
+    appSecret: normalizeSecret(next.appSecret, 'appSecret'),
+    enabled: next.enabled,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const payload: StoredQQProviderConfigV1 = {
+    version: 1,
+    appId: normalized.appId,
+    enabled: normalized.enabled,
+    updatedAt: normalized.updatedAt || new Date().toISOString(),
+    secret: encryptQQSecret({ appSecret: normalized.appSecret }),
+  };
+
+  const dir = userImDir(userId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, 'qq.json');
   const tmp = `${filePath}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
   fs.renameSync(tmp, filePath);
