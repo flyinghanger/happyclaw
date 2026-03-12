@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
@@ -429,6 +430,59 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_daily_usage_user_date ON daily_usage(user_id, date);
   `);
 
+  // Token usage tracking tables
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS usage_records (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      agent_id TEXT,
+      message_id TEXT,
+      model TEXT NOT NULL DEFAULT 'unknown',
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cost_usd REAL NOT NULL DEFAULT 0,
+      duration_ms INTEGER DEFAULT 0,
+      num_turns INTEGER DEFAULT 0,
+      source TEXT NOT NULL DEFAULT 'agent',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_usage_user_date ON usage_records(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_usage_group_date ON usage_records(group_folder, created_at);
+    CREATE INDEX IF NOT EXISTS idx_usage_model_date ON usage_records(model, created_at);
+
+    CREATE TABLE IF NOT EXISTS usage_daily_summary (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      date TEXT NOT NULL,
+      total_input_tokens INTEGER NOT NULL DEFAULT 0,
+      total_output_tokens INTEGER NOT NULL DEFAULT 0,
+      total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+      total_cost_usd REAL NOT NULL DEFAULT 0,
+      request_count INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(user_id, model, date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_user_date ON usage_daily_summary(user_id, date);
+
+    CREATE TABLE IF NOT EXISTS user_quotas (
+      user_id TEXT PRIMARY KEY,
+      monthly_cost_limit_usd REAL NOT NULL DEFAULT -1,
+      monthly_token_limit INTEGER NOT NULL DEFAULT -1,
+      daily_cost_limit_usd REAL NOT NULL DEFAULT -1,
+      daily_request_limit INTEGER NOT NULL DEFAULT -1,
+      billing_cycle_start TEXT,
+      subscription_tier TEXT,
+      subscription_expires_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
   // Lightweight migrations for existing DBs
   ensureColumn('users', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0');
@@ -471,11 +525,7 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'require_mention', 'INTEGER DEFAULT 0');
   ensureColumn('registered_groups', 'mcp_mode', "TEXT DEFAULT 'inherit'");
   ensureColumn('registered_groups', 'selected_mcps', 'TEXT');
-  ensureColumn(
-    'registered_groups',
-    'activation_mode',
-    "TEXT DEFAULT 'auto'",
-  );
+  ensureColumn('registered_groups', 'activation_mode', "TEXT DEFAULT 'auto'");
   ensureColumn('messages', 'token_usage', 'TEXT');
 
   // Add index on target_agent_id for fast lookup of IM bindings
@@ -891,7 +941,100 @@ export function initDatabase(): void {
     })();
   }
 
-  const SCHEMA_VERSION = '27';
+  // v27→v28: Token usage tables + history migration
+  const v28Check = getRouterStateInternal('schema_version');
+  if (!v28Check || parseInt(v28Check, 10) < 28) {
+    db.transaction(() => {
+      // Count messages with token_usage for logging
+      const countBefore = (
+        db
+          .prepare(
+            "SELECT COUNT(*) as cnt FROM messages WHERE token_usage IS NOT NULL AND json_extract(token_usage, '$.modelUsage') IS NOT NULL",
+          )
+          .get() as { cnt: number }
+      ).cnt;
+
+      // Migrate from messages.token_usage modelUsage into usage_records
+      db.exec(`
+        INSERT OR IGNORE INTO usage_records (id, user_id, group_folder, message_id, model,
+          input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+          cost_usd, duration_ms, num_turns, source, created_at)
+        SELECT
+          lower(hex(randomblob(16))),
+          COALESCE(rg.created_by, 'system'),
+          COALESCE(rg.folder, m.chat_jid),
+          m.id,
+          COALESCE(jme.key, 'unknown'),
+          COALESCE(json_extract(jme.value, '$.inputTokens'), 0),
+          COALESCE(json_extract(jme.value, '$.outputTokens'), 0),
+          0, 0,
+          COALESCE(json_extract(jme.value, '$.costUSD'), 0),
+          COALESCE(json_extract(m.token_usage, '$.durationMs'), 0),
+          COALESCE(json_extract(m.token_usage, '$.numTurns'), 0),
+          'agent',
+          m.timestamp
+        FROM messages m
+          JOIN json_each(json_extract(m.token_usage, '$.modelUsage')) jme
+          LEFT JOIN registered_groups rg ON rg.jid = m.chat_jid
+        WHERE m.token_usage IS NOT NULL
+          AND json_extract(m.token_usage, '$.modelUsage') IS NOT NULL
+      `);
+
+      // Migrate messages without modelUsage (legacy) using root-level fields
+      db.exec(`
+        INSERT OR IGNORE INTO usage_records (id, user_id, group_folder, message_id, model,
+          input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+          cost_usd, duration_ms, num_turns, source, created_at)
+        SELECT
+          lower(hex(randomblob(16))),
+          COALESCE(rg.created_by, 'system'),
+          COALESCE(rg.folder, m.chat_jid),
+          m.id,
+          'legacy-unknown',
+          COALESCE(json_extract(m.token_usage, '$.inputTokens'), 0),
+          COALESCE(json_extract(m.token_usage, '$.outputTokens'), 0),
+          COALESCE(json_extract(m.token_usage, '$.cacheReadInputTokens'), 0),
+          COALESCE(json_extract(m.token_usage, '$.cacheCreationInputTokens'), 0),
+          COALESCE(json_extract(m.token_usage, '$.costUSD'), 0),
+          COALESCE(json_extract(m.token_usage, '$.durationMs'), 0),
+          COALESCE(json_extract(m.token_usage, '$.numTurns'), 0),
+          'agent',
+          m.timestamp
+        FROM messages m
+          LEFT JOIN registered_groups rg ON rg.jid = m.chat_jid
+        WHERE m.token_usage IS NOT NULL
+          AND (json_extract(m.token_usage, '$.modelUsage') IS NULL
+               OR json_type(json_extract(m.token_usage, '$.modelUsage')) != 'object')
+      `);
+
+      // Build daily summary from usage_records
+      db.exec(`
+        INSERT OR REPLACE INTO usage_daily_summary (user_id, model, date,
+          total_input_tokens, total_output_tokens,
+          total_cache_read_tokens, total_cache_creation_tokens,
+          total_cost_usd, request_count, updated_at)
+        SELECT
+          user_id, model, date(created_at, 'localtime'),
+          SUM(input_tokens), SUM(output_tokens),
+          SUM(cache_read_input_tokens), SUM(cache_creation_input_tokens),
+          SUM(cost_usd), COUNT(*), datetime('now')
+        FROM usage_records
+        GROUP BY user_id, model, date(created_at, 'localtime')
+      `);
+
+      const countAfter = (
+        db.prepare('SELECT COUNT(*) as cnt FROM usage_records').get() as {
+          cnt: number;
+        }
+      ).cnt;
+      logger.info(
+        { countBefore, countAfter },
+        'Token usage migration v27→v28 completed',
+      );
+    })();
+  }
+
+  const SCHEMA_VERSION = '28';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -1260,6 +1403,249 @@ export function getTokenUsageSummary(
     totalMessages: row.total_messages,
     totalActiveDays: row.total_active_days,
   };
+}
+
+/**
+ * Get a local timezone date string (YYYY-MM-DD) from a Date or ISO string.
+ */
+function toLocalDateString(date?: Date | string): string {
+  const d = date ? new Date(date) : new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Insert a usage record and update daily summary.
+ */
+export function insertUsageRecord(record: {
+  userId: string;
+  groupFolder: string;
+  agentId?: string | null;
+  messageId?: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  costUSD: number;
+  durationMs?: number;
+  numTurns?: number;
+  source?: string;
+}): void {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const localDate = toLocalDateString();
+
+  db.transaction(() => {
+    // Insert into usage_records
+    db.prepare(
+      `
+      INSERT INTO usage_records (id, user_id, group_folder, agent_id, message_id, model,
+        input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+        cost_usd, duration_ms, num_turns, source, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    ).run(
+      id,
+      record.userId,
+      record.groupFolder,
+      record.agentId ?? null,
+      record.messageId ?? null,
+      record.model,
+      record.inputTokens,
+      record.outputTokens,
+      record.cacheReadInputTokens,
+      record.cacheCreationInputTokens,
+      record.costUSD,
+      record.durationMs ?? 0,
+      record.numTurns ?? 0,
+      record.source ?? 'agent',
+      now,
+    );
+
+    // Upsert daily summary
+    db.prepare(
+      `
+      INSERT INTO usage_daily_summary (user_id, model, date,
+        total_input_tokens, total_output_tokens,
+        total_cache_read_tokens, total_cache_creation_tokens,
+        total_cost_usd, request_count, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))
+      ON CONFLICT(user_id, model, date) DO UPDATE SET
+        total_input_tokens = total_input_tokens + excluded.total_input_tokens,
+        total_output_tokens = total_output_tokens + excluded.total_output_tokens,
+        total_cache_read_tokens = total_cache_read_tokens + excluded.total_cache_read_tokens,
+        total_cache_creation_tokens = total_cache_creation_tokens + excluded.total_cache_creation_tokens,
+        total_cost_usd = total_cost_usd + excluded.total_cost_usd,
+        request_count = request_count + 1,
+        updated_at = datetime('now')
+    `,
+    ).run(
+      record.userId,
+      record.model,
+      localDate,
+      record.inputTokens,
+      record.outputTokens,
+      record.cacheReadInputTokens,
+      record.cacheCreationInputTokens,
+      record.costUSD,
+    );
+  })();
+}
+
+/**
+ * Get usage stats from daily summary table (fixes timezone + token KPI issues).
+ */
+export function getUsageDailyStats(
+  days: number,
+  userId?: string,
+  modelFilter?: string,
+): Array<{
+  date: string;
+  model: string;
+  user_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  cost_usd: number;
+  request_count: number;
+}> {
+  const sinceDate = toLocalDateString(new Date(Date.now() - days * 86400000));
+  const conditions: string[] = ['date >= ?'];
+  const params: unknown[] = [sinceDate];
+
+  if (userId) {
+    conditions.push('user_id = ?');
+    params.push(userId);
+  }
+  if (modelFilter) {
+    conditions.push('model = ?');
+    params.push(modelFilter);
+  }
+
+  const whereClause = conditions.join(' AND ');
+  return db
+    .prepare(
+      `
+    SELECT date, model, user_id,
+      total_input_tokens as input_tokens,
+      total_output_tokens as output_tokens,
+      total_cache_read_tokens as cache_read_tokens,
+      total_cache_creation_tokens as cache_creation_tokens,
+      total_cost_usd as cost_usd,
+      request_count
+    FROM usage_daily_summary
+    WHERE ${whereClause}
+    ORDER BY date ASC
+  `,
+    )
+    .all(...params) as Array<{
+    date: string;
+    model: string;
+    user_id: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+    cost_usd: number;
+    request_count: number;
+  }>;
+}
+
+/**
+ * Get usage summary from daily summary table.
+ */
+export function getUsageDailySummary(
+  days: number,
+  userId?: string,
+  modelFilter?: string,
+): {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheCreationTokens: number;
+  totalCostUSD: number;
+  totalMessages: number;
+  totalActiveDays: number;
+} {
+  const sinceDate = toLocalDateString(new Date(Date.now() - days * 86400000));
+  const conditions: string[] = ['date >= ?'];
+  const params: unknown[] = [sinceDate];
+
+  if (userId) {
+    conditions.push('user_id = ?');
+    params.push(userId);
+  }
+  if (modelFilter) {
+    conditions.push('model = ?');
+    params.push(modelFilter);
+  }
+
+  const whereClause = conditions.join(' AND ');
+  const row = db
+    .prepare(
+      `
+    SELECT
+      COALESCE(SUM(total_input_tokens), 0) as total_input,
+      COALESCE(SUM(total_output_tokens), 0) as total_output,
+      COALESCE(SUM(total_cache_read_tokens), 0) as total_cache_read,
+      COALESCE(SUM(total_cache_creation_tokens), 0) as total_cache_creation,
+      COALESCE(SUM(total_cost_usd), 0) as total_cost,
+      COALESCE(SUM(request_count), 0) as total_messages,
+      COUNT(DISTINCT date) as total_active_days
+    FROM usage_daily_summary
+    WHERE ${whereClause}
+  `,
+    )
+    .get(...params) as {
+    total_input: number;
+    total_output: number;
+    total_cache_read: number;
+    total_cache_creation: number;
+    total_cost: number;
+    total_messages: number;
+    total_active_days: number;
+  };
+
+  return {
+    totalInputTokens: row.total_input,
+    totalOutputTokens: row.total_output,
+    totalCacheReadTokens: row.total_cache_read,
+    totalCacheCreationTokens: row.total_cache_creation,
+    totalCostUSD: row.total_cost,
+    totalMessages: row.total_messages,
+    totalActiveDays: row.total_active_days,
+  };
+}
+
+/**
+ * Get list of all models that have usage data.
+ */
+export function getUsageModels(): string[] {
+  const rows = db
+    .prepare('SELECT DISTINCT model FROM usage_daily_summary ORDER BY model')
+    .all() as Array<{ model: string }>;
+  return rows.map((r) => r.model);
+}
+
+/**
+ * Get list of users that have usage data.
+ */
+export function getUsageUsers(): Array<{ id: string; username: string }> {
+  const rows = db
+    .prepare(
+      `
+    SELECT DISTINCT uds.user_id as id, COALESCE(u.username, uds.user_id) as username
+    FROM usage_daily_summary uds
+    LEFT JOIN users u ON u.id = uds.user_id
+    ORDER BY u.username
+  `,
+    )
+    .all() as Array<{ id: string; username: string }>;
+  return rows;
 }
 
 export function getNewMessages(
@@ -1962,14 +2348,14 @@ export function getMessagesPage(
 ): Array<NewMessage & { is_from_me: boolean }> {
   const sql = before
     ? `
-      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
       FROM messages
       WHERE chat_jid = ? AND timestamp < ?
       ORDER BY timestamp DESC
       LIMIT ?
     `
     : `
-      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
       FROM messages
       WHERE chat_jid = ?
       ORDER BY timestamp DESC
@@ -1998,7 +2384,7 @@ export function getMessagesAfter(
 ): Array<NewMessage & { is_from_me: boolean }> {
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
        FROM messages
        WHERE chat_jid = ? AND timestamp > ?
        ORDER BY timestamp ASC
@@ -2025,12 +2411,12 @@ export function getMessagesPageMulti(
 
   const placeholders = chatJids.map(() => '?').join(',');
   const sql = before
-    ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+    ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp < ?
        ORDER BY timestamp DESC
        LIMIT ?`
-    : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+    : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
        FROM messages
        WHERE chat_jid IN (${placeholders})
        ORDER BY timestamp DESC
@@ -2061,7 +2447,7 @@ export function getMessagesAfterMulti(
   const placeholders = chatJids.map(() => '?').join(',');
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp > ?
        ORDER BY timestamp ASC

@@ -978,7 +978,7 @@ async function runQuery(
       const sdkModelUsage = resultMsg.modelUsage as Record<string, Record<string, number>> | undefined;
       if (sdkUsage) {
         const modelUsageSummary: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }> = {};
-        if (sdkModelUsage) {
+        if (sdkModelUsage && Object.keys(sdkModelUsage).length > 0) {
           for (const [model, mu] of Object.entries(sdkModelUsage)) {
             modelUsageSummary[model] = {
               inputTokens: mu.inputTokens || 0,
@@ -986,6 +986,13 @@ async function runQuery(
               costUSD: mu.costUSD || 0,
             };
           }
+        } else {
+          // Fallback: use session-level model name when SDK doesn't provide per-model breakdown
+          modelUsageSummary[CLAUDE_MODEL] = {
+            inputTokens: sdkUsage.input_tokens || 0,
+            outputTokens: sdkUsage.output_tokens || 0,
+            costUSD: (resultMsg.total_cost_usd as number) || 0,
+          };
         }
         emit({
           status: 'stream',

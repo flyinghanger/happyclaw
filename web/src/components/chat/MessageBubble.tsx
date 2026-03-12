@@ -54,6 +54,92 @@ function ReasoningBlock({ content }: { content: string }) {
   );
 }
 
+/** Parse and display token usage for AI messages */
+function TokenUsageDisplay({ tokenUsageJson }: { tokenUsageJson: string }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const usage = (() => {
+    try {
+      return JSON.parse(tokenUsageJson) as {
+        inputTokens?: number;
+        outputTokens?: number;
+        cacheReadInputTokens?: number;
+        cacheCreationInputTokens?: number;
+        costUSD?: number;
+        durationMs?: number;
+        numTurns?: number;
+        modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
+      };
+    } catch {
+      return null;
+    }
+  })();
+
+  if (!usage) return null;
+
+  const models = usage.modelUsage ? Object.entries(usage.modelUsage) : [];
+  const primaryModel = models.length > 0 ? models[0][0].replace('claude-', '') : null;
+  const totalTokens = (usage.inputTokens || 0) + (usage.outputTokens || 0);
+
+  const formatNum = (n: number): string => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return String(n);
+  };
+
+  const formatCost = (usd: number): string => {
+    if (usd >= 1) return `$${usd.toFixed(2)}`;
+    if (usd >= 0.01) return `$${usd.toFixed(3)}`;
+    if (usd > 0) return `$${usd.toFixed(4)}`;
+    return '$0.00';
+  };
+
+  return (
+    <div className="mt-1.5">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <span className="opacity-60">📊</span>
+        {primaryModel && <span>{primaryModel}</span>}
+        {primaryModel && <span className="opacity-40">·</span>}
+        <span>{formatNum(totalTokens)} tokens</span>
+        <span className="opacity-40">·</span>
+        <span>{formatCost(usage.costUSD || 0)}</span>
+        {usage.durationMs ? (
+          <>
+            <span className="opacity-40">·</span>
+            <span>{(usage.durationMs / 1000).toFixed(1)}s</span>
+          </>
+        ) : null}
+        {models.length > 1 && (
+          expanded
+            ? <ChevronUp className="w-3 h-3" />
+            : <ChevronDown className="w-3 h-3" />
+        )}
+      </button>
+
+      {expanded && models.length > 0 && (
+        <div className="mt-1.5 text-xs text-muted-foreground space-y-1 pl-4 border-l-2 border-border">
+          {models.map(([model, mu]) => (
+            <div key={model}>
+              <span className="font-medium">{model}</span>
+              <span className="ml-2">↓{formatNum(mu.inputTokens)} ↑{formatNum(mu.outputTokens)}</span>
+              <span className="ml-2 opacity-70">{formatCost(mu.costUSD)}</span>
+            </div>
+          ))}
+          {(usage.cacheReadInputTokens || 0) > 0 && (
+            <div className="opacity-70">
+              Cache: {formatNum(usage.cacheReadInputTokens || 0)} read
+              {(usage.cacheCreationInputTokens || 0) > 0 && ` / ${formatNum(usage.cacheCreationInputTokens || 0)} created`}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export const MessageBubble = memo(function MessageBubble({ message, showTime, thinkingContent, isShared }: MessageBubbleProps) {
   const [copied, setCopied] = useState(false);
   const [lightboxState, setLightboxState] = useState<{ images: string[]; index: number } | null>(null);
@@ -282,6 +368,11 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
               <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words text-foreground">{message.content}</p>
             )}
           </div>
+        )}
+
+        {/* Token usage (compact mode) */}
+        {isAI && message.token_usage && (
+          <TokenUsageDisplay tokenUsageJson={message.token_usage} />
         )}
 
         {lightboxState && (
@@ -513,6 +604,11 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
                 <MarkdownRenderer content={message.content} groupJid={message.chat_jid} variant="chat" />
               </div>
             )}
+
+            {/* Token usage */}
+            {message.is_from_me && message.token_usage && (
+              <TokenUsageDisplay tokenUsageJson={message.token_usage} />
+            )}
           </div>
         </div>
       </div>
@@ -538,6 +634,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
 }, (prev, next) =>
   prev.message.id === next.message.id &&
   prev.message.content === next.message.content &&
+  prev.message.token_usage === next.message.token_usage &&
   prev.showTime === next.showTime &&
   prev.thinkingContent === next.thinkingContent &&
   prev.isShared === next.isShared

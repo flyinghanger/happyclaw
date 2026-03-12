@@ -1,12 +1,11 @@
 import { Hono } from 'hono';
 import type { Variables } from '../web-context.js';
-import { canAccessGroup } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import {
-  getTokenUsageStats,
-  getTokenUsageSummary,
-  getAllRegisteredGroups,
-  getAllChats,
+  getUsageDailyStats,
+  getUsageDailySummary,
+  getUsageModels,
+  getUsageUsers,
 } from '../db.js';
 import type { AuthUser } from '../types.js';
 
@@ -15,37 +14,24 @@ const usage = new Hono<{ Variables: Variables }>();
 usage.use('*', authMiddleware);
 
 /**
- * Get the list of chat JIDs that the user can access.
- * Admin sees all; member sees only their accessible groups.
+ * Resolve userId for queries:
+ * - Admin can filter by any userId or see all (undefined = all)
+ * - Member always sees only their own data
  */
-function getAccessibleChatJids(user: AuthUser): string[] | undefined {
-  // Admin sees all stats (no filter)
-  if (user.role === 'admin') return undefined;
-
-  const groups = getAllRegisteredGroups();
-  const chats = getAllChats();
-  const accessibleJids: string[] = [];
-
-  for (const chat of chats) {
-    const group = groups[chat.jid];
-    if (
-      group &&
-      canAccessGroup(
-        { id: user.id, role: user.role },
-        { ...group, jid: chat.jid },
-      )
-    ) {
-      accessibleJids.push(chat.jid);
-    }
+function resolveUserId(
+  user: AuthUser,
+  requestedUserId?: string,
+): string | undefined {
+  if (user.role === 'admin') {
+    return requestedUserId || undefined; // undefined = all users
   }
-
-  return accessibleJids;
+  return user.id; // member always sees only own data
 }
 
 /**
- * GET /api/usage/stats?days=7
- * Returns aggregated token usage statistics.
- * Admin: all stats. Member: only accessible workspaces.
+ * GET /api/usage/stats?days=7&userId=&model=
+ * Returns aggregated token usage statistics from usage_daily_summary.
+ * Fixes: token KPI (uses modelUsage data) + timezone (local date grouping).
  */
 usage.get('/stats', (c) => {
   const user = c.get('user') as AuthUser;
@@ -54,29 +40,47 @@ usage.get('/stats', (c) => {
     ? Math.min(Math.max(parseInt(daysParam, 10) || 7, 1), 365)
     : 7;
 
-  const chatJids = getAccessibleChatJids(user);
+  const userId = resolveUserId(user, c.req.query('userId') || undefined);
+  const model = c.req.query('model') || undefined;
 
-  // If non-admin has no accessible groups, return empty stats
-  if (chatJids && chatJids.length === 0) {
-    return c.json({
-      summary: {
-        totalInputTokens: 0,
-        totalOutputTokens: 0,
-        totalCacheReadTokens: 0,
-        totalCacheCreationTokens: 0,
-        totalCostUSD: 0,
-        totalMessages: 0,
-        totalActiveDays: 0,
-      },
-      breakdown: [],
-      days,
-    });
+  const summary = getUsageDailySummary(days, userId, model);
+  const breakdown = getUsageDailyStats(days, userId, model);
+
+  // Compute actual data range for frontend display
+  const dates = breakdown.map((r) => r.date);
+  const uniqueDates = [...new Set(dates)].sort();
+  const dataRange =
+    uniqueDates.length > 0
+      ? {
+          from: uniqueDates[0],
+          to: uniqueDates[uniqueDates.length - 1],
+          activeDays: uniqueDates.length,
+        }
+      : null;
+
+  return c.json({ summary, breakdown, days, dataRange });
+});
+
+/**
+ * GET /api/usage/models
+ * Returns list of all models that have usage data.
+ */
+usage.get('/models', (c) => {
+  const models = getUsageModels();
+  return c.json({ models });
+});
+
+/**
+ * GET /api/usage/users
+ * Returns list of users that have usage data. Admin only.
+ */
+usage.get('/users', (c) => {
+  const user = c.get('user') as AuthUser;
+  if (user.role !== 'admin') {
+    return c.json({ users: [{ id: user.id, username: user.username }] });
   }
-
-  const summary = getTokenUsageSummary(days, chatJids);
-  const breakdown = getTokenUsageStats(days, chatJids);
-
-  return c.json({ summary, breakdown, days });
+  const users = getUsageUsers();
+  return c.json({ users });
 });
 
 export { usage };

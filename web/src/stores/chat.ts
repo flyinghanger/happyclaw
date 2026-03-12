@@ -18,6 +18,7 @@ export interface Message {
   timestamp: string;
   is_from_me: boolean;
   attachments?: string;
+  token_usage?: string;
 }
 
 // Streaming event types (canonical source: shared/stream-event.ts)

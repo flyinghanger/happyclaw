@@ -43,7 +43,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/task-scheduler.ts` | 定时调度：60s 轮询、cron / interval / once 三种模式、group / isolated 上下文 |
 | `src/file-manager.ts` | 文件安全：路径遍历防护、符号链接检测、系统路径保护（`logs/`、`CLAUDE.md`、`.claude/`、`conversations/`） |
 | `src/mount-security.ts` | 挂载安全：白名单校验、黑名单模式匹配（`.ssh`、`.gnupg` 等）、非主会话只读强制 |
-| `src/db.ts` | 数据层：SQLite WAL 模式、Schema 版本校验（v1→v18）、核心表定义 |
+| `src/db.ts` | 数据层：SQLite WAL 模式、Schema 版本校验（v1→v24）、核心表定义 |
 | `src/auth.ts` | 密码工具：bcrypt 哈希/验证、Session Token 生成、用户名/密码校验 |
 | `src/permissions.ts` | 权限常量和模板定义（`ALL_PERMISSIONS`、`PERMISSION_TEMPLATES`） |
 | `src/schemas.ts` | Zod v4 校验 schema：API 请求体校验 |
@@ -312,7 +312,7 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 
 ## 5. 数据库表
 
-SQLite WAL 模式，Schema 经历 v1→v18 演进（`db.ts` 中的 `SCHEMA_VERSION`）。
+SQLite WAL 模式，Schema 经历 v1→v24 演进（`db.ts` 中的 `SCHEMA_VERSION`）。
 
 | 表 | 主键 | 用途 |
 |-----|------|------|
@@ -329,6 +329,9 @@ SQLite WAL 模式，Schema 经历 v1→v18 演进（`db.ts` 中的 `SCHEMA_VERSI
 | `auth_audit_log` | `id` (auto) | 认证审计日志 |
 | `group_members` | `(group_folder, user_id)` | 共享工作区成员（用户与群组的多对多关系） |
 | `agents` | `id` | Sub-Agent（status、kind、prompt、result_summary，属于特定群组） |
+| `usage_records` | `id` | Token 用量明细（per-model 拆行，关联 user_id、group_folder、message_id） |
+| `usage_daily_summary` | `(user_id, model, date)` | 日维度用量预聚合（本地时区日期，增量 UPSERT） |
+| `user_quotas` | `user_id` | 用户配额（预留，暂不写入数据） |
 
 **注意**：`registered_groups.folder` 允许重复（多个飞书群组可映射到同一 folder）。`registered_groups.is_home` 标记用户主容器。
 
@@ -446,6 +449,11 @@ scripts/                      # 构建辅助脚本
 - `GET /api/mcp-servers` · `POST /api/mcp-servers`（CRUD，per-user）
 - `PATCH /api/mcp-servers/:id` · `DELETE /api/mcp-servers/:id`
 - `POST /api/mcp-servers/sync-host`（从宿主机同步 MCP Server 配置）
+
+### 用量统计
+- `GET /api/usage/stats?days=7&userId=&model=`（从 `usage_daily_summary` 查询，支持用户/模型筛选）
+- `GET /api/usage/models`（去重模型列表）
+- `GET /api/usage/users`（有用量数据的用户列表，admin 可见全部）
 
 ### 监控
 - `GET /api/status` · `GET /api/health`（无需认证）
