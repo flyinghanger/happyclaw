@@ -88,6 +88,7 @@ import {
   abortAllStreamingSessions,
   registerMessageIdMapping,
   getStreamingSession,
+  StreamingCardController,
 } from './feishu-streaming-card.js';
 import {
   formatContextMessages,
@@ -132,6 +133,7 @@ import {
   MessageCursor,
   NewMessage,
   RegisteredGroup,
+  StreamEvent,
 } from './types.js';
 import { logger } from './logger.js';
 import { stripAgentInternalTags, stripVirtualJidSuffix } from './utils.js';
@@ -158,6 +160,67 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_MAIN_JID = 'web:main';
 const DEFAULT_MAIN_NAME = 'Main';
 const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Feed a stream event into a Feishu streaming card controller.
+ * Centralizes the event → card mapping for both main and sub-agent handlers.
+ */
+function feedStreamEventToCard(
+  session: StreamingCardController,
+  se: StreamEvent,
+  accumulatedText: string,
+): void {
+  switch (se.eventType) {
+    case 'text_delta':
+      if (se.text) session.append(accumulatedText);
+      break;
+    case 'thinking_delta':
+      if (se.text) {
+        session.appendThinking(se.text);
+      } else if (!accumulatedText) {
+        // Only call setThinking() when no text was appended
+        // (appendThinking already sets thinking=true and triggers card creation)
+        session.setThinking();
+      }
+      break;
+    case 'tool_use_start':
+      if (se.toolUseId && se.toolName) {
+        session.startTool(se.toolUseId, se.toolName);
+        const label = se.skillName ? `技能 ${se.skillName}` : se.toolName;
+        session.pushRecentEvent(`🔄 ${label}`);
+      }
+      break;
+    case 'tool_use_end':
+      if (se.toolUseId) {
+        const info = session.getToolInfo(se.toolUseId);
+        session.endTool(se.toolUseId, false);
+        if (info) session.pushRecentEvent(`✅ ${info.name}`);
+      }
+      break;
+    case 'tool_progress':
+      if (se.toolUseId && se.toolInputSummary) {
+        session.updateToolSummary(se.toolUseId, se.toolInputSummary);
+      }
+      break;
+    case 'status':
+      if (se.statusText && se.statusText !== 'interrupted') {
+        session.setSystemStatus(se.statusText);
+      }
+      break;
+    case 'hook_started':
+      session.setHook({ hookName: se.hookName || '', hookEvent: se.hookEvent || '' });
+      break;
+    case 'hook_response':
+      if (se.hookName) {
+        session.pushRecentEvent(`✅ Hook: ${se.hookName}`);
+      }
+      session.setHook(null);
+      break;
+    case 'todo_update':
+      if (se.todos) session.setTodos(se.todos);
+      break;
+  }
+}
 
 let globalMessageCursor: MessageCursor = { timestamp: '', id: '' };
 let sessions: Record<string, string> = {};
@@ -1738,29 +1801,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
           // ── Feed stream events into Feishu streaming card ──
           if (streamingSession) {
-            const se = result.streamEvent;
-            switch (se.eventType) {
-              case 'text_delta':
-                if (se.text) {
-                  streamingSession.append(streamingAccumulatedText);
-                }
-                break;
-              case 'thinking_delta':
-                if (!streamingAccumulatedText) {
-                  streamingSession.setThinking();
-                }
-                break;
-              case 'tool_use_start':
-                if (se.toolUseId && se.toolName) {
-                  streamingSession.startTool(se.toolUseId, se.toolName);
-                }
-                break;
-              case 'tool_use_end':
-                if (se.toolUseId) {
-                  streamingSession.endTool(se.toolUseId, false);
-                }
-                break;
-            }
+            feedStreamEventToCard(streamingSession, result.streamEvent, streamingAccumulatedText);
           }
 
           // ── 中断时立即保存已输出内容 ──
@@ -3889,29 +3930,7 @@ async function processAgentConversation(
 
       // ── Feed stream events into Feishu streaming card ──
       if (agentStreamingSession) {
-        const se = output.streamEvent;
-        switch (se.eventType) {
-          case 'text_delta':
-            if (se.text) {
-              agentStreamingSession.append(agentStreamingAccText);
-            }
-            break;
-          case 'thinking_delta':
-            if (!agentStreamingAccText) {
-              agentStreamingSession.setThinking();
-            }
-            break;
-          case 'tool_use_start':
-            if (se.toolUseId && se.toolName) {
-              agentStreamingSession.startTool(se.toolUseId, se.toolName);
-            }
-            break;
-          case 'tool_use_end':
-            if (se.toolUseId) {
-              agentStreamingSession.endTool(se.toolUseId, false);
-            }
-            break;
-        }
+        feedStreamEventToCard(agentStreamingSession, output.streamEvent, agentStreamingAccText);
       }
 
       // ── 中断时立即保存已输出内容 ──
