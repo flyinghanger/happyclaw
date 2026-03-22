@@ -702,7 +702,8 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       'register_group',
       `Register a new group so the agent can respond to messages there. Admin home only.
 
-Use available_groups.json to find the JID for a group. The folder name should be lowercase with hyphens (e.g., "family-chat").`,
+Use available_groups.json to find the JID for a group. The folder name should be lowercase with hyphens (e.g., "family-chat").
+You can optionally specify execution_mode: "container" (default, isolated Docker) or "host" (direct host access, admin only).`,
       {
         jid: z.string().describe('The chat JID (e.g., "feishu:oc_xxxx")'),
         name: z.string().describe('Display name for the group'),
@@ -710,6 +711,12 @@ Use available_groups.json to find the JID for a group. The folder name should be
           .string()
           .describe(
             'Folder name for group files (lowercase, hyphens, e.g., "family-chat")',
+          ),
+        execution_mode: z
+          .enum(['container', 'host'])
+          .optional()
+          .describe(
+            'Execution mode: "container" (default, isolated Docker) or "host" (direct host access)',
           ),
       },
       async (args) => {
@@ -729,6 +736,7 @@ Use available_groups.json to find the JID for a group. The folder name should be
           jid: args.jid,
           name: args.name,
           folder: args.folder,
+          executionMode: args.execution_mode,
           timestamp: new Date().toISOString(),
         };
         writeIpcFile(TASKS_DIR, data);

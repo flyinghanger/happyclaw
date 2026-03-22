@@ -3827,6 +3827,7 @@ async function processTaskIpc(
     name?: string;
     folder?: string;
     containerConfig?: RegisteredGroup['containerConfig'];
+    executionMode?: string;
     // For install_skill / uninstall_skill
     package?: string;
     requestId?: string;
@@ -4047,12 +4048,17 @@ async function processTaskIpc(
         const sourceEntry = Object.values(registeredGroups).find(
           (g) => g.folder === sourceGroup,
         );
+        const execMode =
+          data.executionMode === 'host' || data.executionMode === 'container'
+            ? data.executionMode
+            : undefined;
         registerGroup(data.jid, {
           name: data.name,
           folder: data.folder,
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,
           created_by: sourceEntry?.created_by,
+          executionMode: execMode,
         });
       } else {
         logger.warn(

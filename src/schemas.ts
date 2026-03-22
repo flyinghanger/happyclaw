@@ -184,6 +184,7 @@ export const GroupPatchSchema = z.object({
   activation_mode: z
     .enum(['auto', 'always', 'when_mentioned', 'disabled'])
     .optional(),
+  execution_mode: z.enum(['container', 'host']).optional(),
 });
 
 export const LoginSchema = z.object({
