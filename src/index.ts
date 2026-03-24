@@ -2454,17 +2454,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               let targetTaskId = se.taskId;
               let existing = getAgent(targetTaskId);
               if (!existing || existing.kind !== 'task') {
+                // agent-runner now translates SDK task_id → toolUseId,
+                // so this fallback should rarely trigger. Keep as safety net.
                 const fallbackTaskId = pickRunningTaskForNotification();
                 if (fallbackTaskId) {
                   targetTaskId = fallbackTaskId;
                   existing = getAgent(fallbackTaskId);
-                  logger.warn(
+                  logger.debug(
                     {
                       chatJid,
                       sdkTaskId: se.taskId,
                       mappedTaskId: fallbackTaskId,
                     },
-                    'Task notification ID mismatch, mapped to running task',
+                    'Task notification ID fallback to running task',
                   );
                 }
               }

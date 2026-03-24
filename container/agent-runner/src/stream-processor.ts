@@ -84,6 +84,12 @@ export class StreamEventProcessor {
   // Background Task tool_use_ids (run_in_background: true)
   private readonly backgroundTaskToolUseIds = new Set<string>();
 
+  // SDK internal task_id → API tool_use_id mapping.
+  // Built from task_started/task_progress system messages so that
+  // task_notification (which carries SDK task_id) can be translated
+  // back to the tool_use_id used at creation time.
+  private readonly sdkTaskIdToToolUseId = new Map<string, string>();
+
   // Sub-agent active tools per parent task ID
   private readonly activeSubAgentToolsByTask = new Map<string, Set<string>>();
 
@@ -593,7 +599,11 @@ export class StreamEventProcessor {
     // task_started / task_progress — emit a status event to keep stdout activity alive.
     // Without this, long-running tasks produce no stdout output, and the host's
     // stuck-runner detector may kill the process after 6 minutes of silence.
+    // Also build sdkTaskId → toolUseId mapping for task_notification translation.
     if (message.subtype === 'task_started' || message.subtype === 'task_progress') {
+      if (message.task_id && message.tool_use_id) {
+        this.sdkTaskIdToToolUseId.set(message.task_id, message.tool_use_id);
+      }
       const desc = message.description || message.summary || '';
       const toolName = message.last_tool_name || '';
       const statusText = message.subtype === 'task_started'
@@ -799,35 +809,47 @@ export class StreamEventProcessor {
     this.pendingAskUserInput.clear();
     this.pendingTodoInput.clear();
     this.pendingGenericInput.clear();
+    this.sdkTaskIdToToolUseId.clear();
   }
 
   /**
    * Process a task_notification system message.
+   * The SDK's task_id differs from the API's tool_use_id used at task creation.
+   * We resolve the effective toolUseId via: message.tool_use_id → sdkTaskId map → raw task_id.
    */
-  processTaskNotification(message: { task_id: string; status: string; summary: string }): void {
-    this.log(`Task notification: task=${message.task_id} status=${message.status} summary=${message.summary}`);
+  processTaskNotification(message: { task_id: string; tool_use_id?: string; status: string; summary: string }): void {
+    const effectiveToolUseId = message.tool_use_id
+      || this.sdkTaskIdToToolUseId.get(message.task_id)
+      || message.task_id;
+    if (effectiveToolUseId !== message.task_id) {
+      this.log(`Task notification: sdkTaskId=${message.task_id} → toolUseId=${effectiveToolUseId} status=${message.status}`);
+    } else {
+      this.log(`Task notification: task=${message.task_id} status=${message.status} summary=${message.summary}`);
+    }
     this.emit({
       status: 'stream', result: null,
       streamEvent: {
         eventType: 'task_notification',
-        taskId: message.task_id,
+        taskId: effectiveToolUseId,
         taskStatus: message.status,
         taskSummary: message.summary,
         isBackground: true,
       },
     });
-    this.cleanupTaskTools(message.task_id);
-    this.backgroundTaskToolUseIds.delete(message.task_id);
-    if (this.taskToolUseIds.has(message.task_id)) {
-      this.taskToolUseIds.delete(message.task_id);
+    this.cleanupTaskTools(effectiveToolUseId);
+    this.backgroundTaskToolUseIds.delete(effectiveToolUseId);
+    if (this.taskToolUseIds.has(effectiveToolUseId)) {
+      this.taskToolUseIds.delete(effectiveToolUseId);
       this.emit({
         status: 'stream', result: null,
-        streamEvent: { eventType: 'tool_use_end', toolUseId: message.task_id },
+        streamEvent: { eventType: 'tool_use_end', toolUseId: effectiveToolUseId },
       });
-      if (this.activeTopLevelToolUseId === message.task_id) {
+      if (this.activeTopLevelToolUseId === effectiveToolUseId) {
         this.activeTopLevelToolUseId = null;
       }
     }
+    // Clean up the mapping entry
+    this.sdkTaskIdToToolUseId.delete(message.task_id);
   }
 
   /**
