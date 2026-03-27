@@ -239,7 +239,7 @@ function parseDingTalkChatId(
     return { type: 'group', conversationId: chatId.slice(6) };
   }
   // Legacy format: direct conversationId (assume group)
-  if (chatId.startsWith('cid') || chatId.includes('cid')) {
+  if (chatId.startsWith('cid')) {
     return { type: 'group', conversationId: chatId };
   }
   return null;
@@ -571,18 +571,15 @@ export function createDingTalkConnection(
     });
   }
 
-  async function sendDingTalkMessage(
+  /**
+   * Send a reply via the sessionWebhook. Supports markdown for group chats.
+   */
+  async function sendDingTalkReply(
     sessionWebhook: string,
     content: string,
+    useMarkdown = false,
   ): Promise<void> {
-    await sendViaSessionWebhook(sessionWebhook, content);
-  }
-
-  async function sendDingTalkGroupMessage(
-    sessionWebhook: string,
-    content: string,
-  ): Promise<void> {
-    await sendViaSessionWebhook(sessionWebhook, content);
+    await sendViaSessionWebhook(sessionWebhook, content, useMarkdown);
   }
 
   // ─── File Download ─────────────────────────────────────────
@@ -1086,6 +1083,69 @@ export function createDingTalkConnection(
     }
   }
 
+  // ─── Image Normalization (shared by picture & image msgtypes) ───
+
+  interface NormalizedImage {
+    content: string;
+    attachmentsJson: string | undefined;
+  }
+
+  /**
+   * Download a DingTalk image, optionally inline as base64, and save to disk.
+   * Unifies the handling of msgtype="picture" (downloadCode API) and
+   * msgtype="image" (contentUrl direct download).
+   */
+  async function normalizeDingTalkImage(
+    jid: string,
+    opts: DingTalkConnectOpts,
+    downloader: () => Promise<{ base64: string; mimeType: string } | null>,
+  ): Promise<NormalizedImage | null> {
+    const imageData = await downloader();
+    if (!imageData) return null;
+
+    const imgBuffer = Buffer.from(imageData.base64, 'base64');
+    const imgSize = imgBuffer.length;
+
+    // Small images are inlined as base64 for Vision API
+    const attachments: { type: 'image'; data: string; mimeType: string }[] =
+      imgSize <= IMAGE_MAX_BASE64_SIZE
+        ? [
+            {
+              type: 'image',
+              data: imageData.base64,
+              mimeType: imageData.mimeType,
+            },
+          ]
+        : [];
+
+    const groupFolder = opts.resolveGroupFolder?.(jid);
+    if (groupFolder) {
+      try {
+        const ext = imageData.mimeType.split('/')[1] || 'jpg';
+        const filename = `img_${Date.now()}.${ext}`;
+        const savedPath = await saveDownloadedFile(
+          groupFolder,
+          'dingtalk',
+          filename,
+          imgBuffer,
+        );
+        return {
+          content: `[图片: ${savedPath}]`,
+          attachmentsJson:
+            attachments.length > 0 ? JSON.stringify(attachments) : undefined,
+        };
+      } catch {
+        return { content: '[图片]', attachmentsJson: undefined };
+      }
+    }
+
+    return {
+      content: '[图片]',
+      attachmentsJson:
+        attachments.length > 0 ? JSON.stringify(attachments) : undefined,
+    };
+  }
+
   // ─── Event Handlers ───────────────────────────────────────
 
   async function handleRobotMessage(
@@ -1156,13 +1216,12 @@ export function createDingTalkConnection(
       if (data.msgtype === 'text' && 'text' in data) {
         content = data.text?.content?.trim() || '';
       } else if (data.msgtype === 'picture' && 'content' in data) {
-        // Picture message: download via pictureDownloadCode (preferred) or downloadCode
+        // Picture message: download via downloadCode API (short or long form)
         interface PictureContent {
           downloadCode?: string;
           pictureDownloadCode?: string;
         }
         const pictureContent = (data as { content: PictureContent }).content;
-        // API parameter name is "downloadCode" — try the short one first
         const downloadCode =
           pictureContent?.downloadCode || pictureContent?.pictureDownloadCode;
         if (!downloadCode) {
@@ -1172,48 +1231,18 @@ export function createDingTalkConnection(
           );
           return;
         }
-        const imageData = await downloadDingTalkImageByDownloadCode(
-          downloadCode,
-          data.robotCode ?? '',
+        const normalized = await normalizeDingTalkImage(jid, opts, () =>
+          downloadDingTalkImageByDownloadCode(
+            downloadCode,
+            data.robotCode ?? '',
+          ),
         );
-        if (imageData) {
-          const imgBuffer = Buffer.from(imageData.base64, 'base64');
-          const imgSize = imgBuffer.length;
-          // Only inline base64 for small images (same threshold as WeChat)
-          const attachments =
-            imgSize <= IMAGE_MAX_BASE64_SIZE
-              ? [
-                  {
-                    type: 'image',
-                    data: imageData.base64,
-                    mimeType: imageData.mimeType,
-                  },
-                ]
-              : [];
-          attachmentsJson =
-            attachments.length > 0 ? JSON.stringify(attachments) : undefined;
-          const groupFolder = opts.resolveGroupFolder?.(jid);
-          if (groupFolder) {
-            try {
-              const filename = `img_${Date.now()}.${imageData.mimeType.split('/')[1] || 'jpg'}`;
-              const savedPath = await saveDownloadedFile(
-                groupFolder,
-                'dingtalk',
-                filename,
-                imgBuffer,
-              );
-              content = `[图片: ${savedPath}]`;
-            } catch (err) {
-              logger.warn({ err }, 'Failed to save DingTalk picture to disk');
-              content = '[图片]';
-            }
-          } else {
-            content = '[图片]';
-          }
-        } else {
+        if (!normalized) {
           logger.warn({ msgId }, 'DingTalk picture download failed, skipping');
           return;
         }
+        content = normalized.content;
+        attachmentsJson = normalized.attachmentsJson;
       } else if (data.msgtype === 'file' && 'content' in data) {
         // File message: download via downloadCode, same API as picture
         interface FileContent {
@@ -1233,7 +1262,6 @@ export function createDingTalkConnection(
           data.robotCode ?? '',
         );
         if (fileBuffer) {
-          const fileSize = fileBuffer.length;
           const groupFolder = opts.resolveGroupFolder?.(jid);
           if (groupFolder) {
             try {
@@ -1269,45 +1297,15 @@ export function createDingTalkConnection(
           logger.warn({ msgId }, 'DingTalk image message missing contentUrl');
           return;
         }
-        const imageData = await downloadDingTalkImageAsBase64(contentUrl);
-        if (imageData) {
-          const imgBuffer = Buffer.from(imageData.base64, 'base64');
-          const imgSize = imgBuffer.length;
-          // Only inline base64 for small images (same threshold as WeChat)
-          const attachments =
-            imgSize <= IMAGE_MAX_BASE64_SIZE
-              ? [
-                  {
-                    type: 'image',
-                    data: imageData.base64,
-                    mimeType: imageData.mimeType,
-                  },
-                ]
-              : [];
-          attachmentsJson =
-            attachments.length > 0 ? JSON.stringify(attachments) : undefined;
-          const groupFolder = opts.resolveGroupFolder?.(jid);
-          if (groupFolder) {
-            try {
-              const filename = `img_${Date.now()}.${imageData.mimeType.split('/')[1] || 'jpg'}`;
-              const savedPath = await saveDownloadedFile(
-                groupFolder,
-                'dingtalk',
-                filename,
-                imgBuffer,
-              );
-              content = `[图片: ${savedPath}]`;
-            } catch (err) {
-              logger.warn({ err }, 'Failed to save DingTalk image to disk');
-              content = '[图片]';
-            }
-          } else {
-            content = '[图片]';
-          }
-        } else {
+        const normalized = await normalizeDingTalkImage(jid, opts, () =>
+          downloadDingTalkImageAsBase64(contentUrl),
+        );
+        if (!normalized) {
           logger.warn({ msgId }, 'DingTalk image download failed, skipping');
           return;
         }
+        content = normalized.content;
+        attachmentsJson = normalized.attachmentsJson;
       }
 
       // Skip empty messages (text without content, or failed image)
@@ -1324,10 +1322,8 @@ export function createDingTalkConnection(
           const reply = success
             ? '配对成功！此聊天已连接到你的账号。'
             : '配对码无效或已过期，请在 Web 设置页重新生成。';
-          if (isGroup) {
-            await sendDingTalkGroupMessage(conversationId, reply);
-          } else if (data.sessionWebhook) {
-            await sendDingTalkMessage(data.sessionWebhook, reply);
+          if (data.sessionWebhook) {
+            await sendDingTalkReply(data.sessionWebhook, reply, isGroup);
           }
         } catch (err) {
           logger.error({ err, jid }, 'DingTalk pair attempt error');
@@ -1369,10 +1365,8 @@ export function createDingTalkConnection(
           const reply = await opts.onCommand(jid, cmdBody);
           if (reply) {
             const plainText = markdownToPlainText(reply);
-            if (isGroup) {
-              await sendDingTalkGroupMessage(conversationId, plainText);
-            } else if (data.sessionWebhook) {
-              await sendDingTalkMessage(data.sessionWebhook, plainText);
+            if (data.sessionWebhook) {
+              await sendDingTalkReply(data.sessionWebhook, plainText, isGroup);
             }
             return;
           }
@@ -1534,10 +1528,6 @@ export function createDingTalkConnection(
       text: string,
       _localImagePaths?: string[],
     ): Promise<void> {
-      logger.info(
-        { chatId, textLen: text.length, text: text.slice(0, 200) },
-        'DingTalk sendMessage called',
-      );
       const parsed = parseDingTalkChatId(chatId);
       if (!parsed) {
         logger.error({ chatId }, 'Invalid DingTalk chat ID format');
@@ -1549,6 +1539,11 @@ export function createDingTalkConnection(
         parsed.type === 'c2c'
           ? `dingtalk:c2c:${parsed.conversationId}`
           : `dingtalk:group:${parsed.conversationId}`;
+
+      logger.info(
+        { chatId, textLen: text.length, text: text.slice(0, 200), jidKey },
+        'DingTalk sendMessage called',
+      );
 
       // C2C messages require the persistent API with senderStaffId.
       // sessionWebhook is DingTalk's reply callback URL — only valid within the
@@ -1719,39 +1714,10 @@ export function createDingTalkConnection(
           'DingTalk file sent successfully',
         );
       } catch (err) {
-        // If batchSend fails (e.g., staff 不存在 for C2C consumer users),
-        // fall back to sending file content as text
-        const errMsg = err instanceof Error ? err.message : String(err);
-        if (errMsg.includes('staff') || errMsg.includes('notExisted')) {
-          logger.warn(
-            { chatId, err: errMsg },
-            'DingTalk batchSend failed (likely C2C consumer user), falling back to text',
-          );
-          // Send file as text content (for small text files)
-          if (fileBuffer.length <= 4096) {
-            const textContent = fileBuffer.toString('utf8');
-            const isSessionWebhookAvailable =
-              lastSessionWebhooks.has(chatId) &&
-              (lastSessionWebhooks.get(chatId)!.length ?? 0) > 0;
-            if (isSessionWebhookAvailable) {
-              const webhook = lastSessionWebhooks.get(chatId)!;
-              const expiry = sessionWebhookExpiry.get(chatId) ?? 0;
-              if (Date.now() < expiry) {
-                const content = `📎 ${fileName}\n\n${textContent}`;
-                await sendDingTalkMessage(webhook, content);
-                logger.info(
-                  { chatId, fileName },
-                  'DingTalk file content sent as text (fallback)',
-                );
-                return;
-              }
-            }
-            logger.warn(
-              { chatId },
-              'DingTalk sessionWebhook expired, cannot send file fallback',
-            );
-          }
-        }
+        logger.error(
+          { err, chatId, fileName },
+          'DingTalk sendFile: batchSend failed',
+        );
         throw err;
       }
     },
