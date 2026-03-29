@@ -390,9 +390,7 @@ Supports: PDF, DOC, XLS, PPT, MP4, ZIP, SO, etc. Max file size: 30MB.`,
           fileName: args.fileName,
           timestamp: new Date().toISOString(),
         };
-        console.error('[DEBUG send_file] Writing IPC file:', { TASKS_DIR, data });
         writeIpcFile(TASKS_DIR, data);
-        console.error('[DEBUG send_file] IPC file written');
         return {
           content: [
             {

@@ -264,6 +264,7 @@ export function createDingTalkConnection(
   let client: DWClient | null = null;
   let stopping = false;
   let readyFired = false;
+  let reconnectCheckInterval: NodeJS.Timeout | null = null;
 
   // Token state for REST API
   let tokenInfo: DingTalkAccessToken | null = null;
@@ -1291,11 +1292,10 @@ export function createDingTalkConnection(
       lastMessageIds.set(jid, msgId);
 
       // Store session webhook for sending replies
-      logger.warn(
+      logger.debug(
         {
           jid,
           hasSessionWebhook: !!data.sessionWebhook,
-          sessionWebhook: data.sessionWebhook,
         },
         'DingTalk message sessionWebhook',
       );
@@ -1685,6 +1685,38 @@ export function createDingTalkConnection(
           { clientId: config.clientId.slice(0, 8) },
           'DingTalk Stream connected',
         );
+
+        // Monitor for subscription recovery: the SDK reconnects automatically after
+        // network interruptions, but the server may drop our subscription registration.
+        // Detect "connected but not subscribed" state and force a full re-register.
+        let reconnectGuard = false;
+        const startReconnectMonitor = (): void => {
+          const check = async (): Promise<void> => {
+            if (stopping || reconnectGuard) return;
+            const sdk = client as any;
+            if (sdk?.connected && !sdk?.registered) {
+              reconnectGuard = true;
+              logger.warn(
+                'DingTalk reconnected but not registered, forcing re-register',
+              );
+              try {
+                const cur = client;
+                if (cur) {
+                  cur.disconnect();
+                  await cur.connect();
+                }
+              } catch {
+                // ignore — SDK will retry on next check
+              } finally {
+                reconnectGuard = false;
+              }
+            }
+          };
+          reconnectCheckInterval = setInterval(check, 15_000);
+          void check(); // immediate first check
+        };
+        startReconnectMonitor();
+
         readyFired = true;
         opts.onReady?.();
         return true;
@@ -1696,6 +1728,10 @@ export function createDingTalkConnection(
 
     async disconnect(): Promise<void> {
       stopping = true;
+      if (reconnectCheckInterval) {
+        clearInterval(reconnectCheckInterval);
+        reconnectCheckInterval = null;
+      }
 
       if (client) {
         try {

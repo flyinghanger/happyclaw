@@ -4776,7 +4776,7 @@ async function processTaskIpc(
     case 'send_file':
       logger.info(
         { data, sourceGroup, isAdminHome, isHome },
-        '[DEBUG] processTaskIpc send_file reached',
+        'processTaskIpc send_file reached',
       );
       if (data.chatJid && data.filePath && data.fileName) {
         // Cross-group authorization check (same as send_message)
@@ -4863,7 +4863,7 @@ async function processTaskIpc(
               fileImRoute,
               activeImReplyRoutesKeys: [...activeImReplyRoutes.keys()],
             },
-            '[DEBUG] send_file fileImRoute computation',
+            'send_file fileImRoute computation',
           );
           if (fileImRoute) {
             const imFileName = data.fileName || path.basename(resolvedPath);
