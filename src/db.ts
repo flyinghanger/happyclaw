@@ -638,6 +638,7 @@ export function initDatabase(): void {
   ensureColumn('scheduled_tasks', 'execution_type', "TEXT DEFAULT 'agent'");
   ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
   ensureColumn('scheduled_tasks', 'notify_channels', 'TEXT');
+  ensureColumn('scheduled_tasks', 'notify_im', 'INTEGER');
   ensureColumn('scheduled_tasks', 'execution_mode', 'TEXT');
   ensureColumn('scheduled_tasks', 'workspace_jid', 'TEXT');
   ensureColumn('scheduled_tasks', 'workspace_folder', 'TEXT');
@@ -1817,8 +1818,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, execution_mode, next_run, status, created_at, created_by, notify_channels)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, execution_mode, next_run, status, created_at, created_by, notify_channels, notify_im)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -1836,6 +1837,7 @@ export function createTask(
     task.created_at,
     task.created_by ?? null,
     task.notify_channels != null ? JSON.stringify(task.notify_channels) : null,
+    task.notify_im != null ? (task.notify_im ? 1 : 0) : null,
   );
 }
 
@@ -1850,6 +1852,12 @@ function mapTaskRow(row: unknown): ScheduledTask {
     }
   } else if (r.notify_channels === undefined) {
     r.notify_channels = null;
+  }
+  // Normalize notify_im: SQLite stores as 0/1 integer or NULL
+  if (r.notify_im === null || r.notify_im === undefined) {
+    r.notify_im = null;
+  } else {
+    r.notify_im = r.notify_im !== 0;
   }
   // Normalize new nullable fields
   if (r.execution_mode === undefined) r.execution_mode = null;
@@ -1894,6 +1902,7 @@ export function updateTask(
       | 'next_run'
       | 'status'
       | 'notify_channels'
+      | 'notify_im'
     >
   >,
 ): void {
@@ -1939,6 +1948,10 @@ export function updateTask(
   if (updates.notify_channels !== undefined) {
     fields.push('notify_channels = ?');
     values.push(updates.notify_channels != null ? JSON.stringify(updates.notify_channels) : null);
+  }
+  if (updates.notify_im !== undefined) {
+    fields.push('notify_im = ?');
+    values.push(updates.notify_im != null ? (updates.notify_im ? 1 : 0) : null);
   }
 
   if (fields.length === 0) return;

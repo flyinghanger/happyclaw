@@ -129,6 +129,8 @@ export interface ScheduledTask {
   created_at: string;
   created_by?: string;
   notify_channels?: string[] | null;
+  /** Push task result to the owner's IM channel after each run. Defaults to true. */
+  notify_im?: boolean | null;
 }
 
 export interface TaskRunLog {

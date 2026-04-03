@@ -29,6 +29,7 @@ import {
   getTaskById,
   getUserById,
   getUserHomeGroup,
+  getJidsByFolder,
   logTaskRun,
   logTaskRunStart,
   updateTaskRunLog,
@@ -39,6 +40,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
+import { imManager } from './im-manager.js';
 import { resolveTaskOwner } from './task-utils.js';
 import { removeFlowArtifacts } from './file-manager.js';
 import { hasScriptCapacity, runScript } from './script-runner.js';
@@ -477,6 +479,45 @@ async function runTask(
 
     // Safety net: finalize run log if not already done by onOutput callback
     finalizeRunLog();
+
+    // Push task execution result to the owner's IM channel.
+    // notify_im defaults to true (null = not set = enabled).
+    const notifyIm = task.notify_im !== false;
+    if (notifyIm && workspaceGroup.created_by) {
+      const ownerId = workspaceGroup.created_by;
+      const homeGroup = getUserHomeGroup(ownerId);
+      if (homeGroup) {
+        // Find an IM-routable JID for the owner's home group
+        const homeJids = getJidsByFolder(homeGroup.folder);
+        const imJid = homeJids.find(
+          (j) => imManager.isChannelAvailableForJid(j),
+        );
+        if (imJid) {
+          const taskLabel = task.prompt.split('\n')[0].trim().slice(0, 40);
+          let notifyText: string;
+          if (error) {
+            const durationSec = Math.round((lastOutputTime - startTime) / 1000);
+            notifyText =
+              `⚠️ 定时任务执行失败\n` +
+              `📋 任务：${taskLabel}\n` +
+              `❌ 错误：${error.slice(0, 300)}\n` +
+              `⏱ 耗时：${durationSec}s`;
+          } else {
+            const summary = result ? result.slice(0, 200) : '（无输出）';
+            notifyText =
+              `✅ 定时任务执行完成\n` +
+              `📋 任务：${taskLabel}\n` +
+              `📝 结果：${summary}`;
+          }
+          imManager.sendMessage(imJid, notifyText).catch((err) => {
+            logger.warn(
+              { taskId: task.id, imJid, err },
+              'Failed to send task IM notification',
+            );
+          });
+        }
+      }
+    }
   }
 
   // manualRun: preserve original next_run schedule
