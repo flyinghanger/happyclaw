@@ -3414,7 +3414,7 @@ async function runAgent(
   try {
     const executionMode = group.executionMode || 'container';
 
-    const onProcessCb = (proc: ChildProcess, identifier: string) => {
+    const onProcessCb = (proc: ChildProcess, identifier: string, selectedProviderId: string | null) => {
       // 宿主机模式：containerName 传 null，走 process.kill() 路径
       const containerName = executionMode === 'container' ? identifier : null;
       queue.registerProcess(
@@ -3423,6 +3423,9 @@ async function runAgent(
         containerName,
         group.folder,
         identifier,
+        undefined, // agentId
+        undefined, // taskRunId
+        selectedProviderId,
       );
     };
 
@@ -5434,7 +5437,7 @@ async function processAgentConversation(
   ipcWatcherManager?.watchGroup(effectiveGroup.folder);
   try {
     const executionMode = effectiveGroup.executionMode || 'container';
-    const onProcessCb = (proc: ChildProcess, identifier: string) => {
+    const onProcessCb = (proc: ChildProcess, identifier: string, selectedProviderId: string | null) => {
       const containerName = executionMode === 'container' ? identifier : null;
       queue.registerProcess(
         virtualJid,
@@ -5443,6 +5446,8 @@ async function processAgentConversation(
         effectiveGroup.folder,
         identifier,
         agentId,
+        undefined, // taskRunId
+        selectedProviderId,
       );
     };
 
@@ -7556,6 +7561,7 @@ async function main(): Promise<void> {
       groupFolder,
       displayName,
       taskRunId,
+      selectedProviderId,
     ) =>
       queue.registerProcess(
         groupJid,
@@ -7565,6 +7571,7 @@ async function main(): Promise<void> {
         displayName,
         undefined, // agentId
         taskRunId,
+        selectedProviderId,
       ),
     sendMessage,
     broadcastStreamEvent,
