@@ -16,7 +16,7 @@ export interface GroupInfo {
   custom_cwd?: string;
   created_by?: string;
   pinned_at?: string;
-  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
   conversation_source?: 'manual' | 'feishu_thread';
   conversation_nav_mode?: 'horizontal' | 'vertical_threads';
 }
@@ -50,7 +50,8 @@ export interface AvailableImGroup {
   avatar?: string;
   member_count?: number;
   channel_type: string;
-  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
+  owner_im_id?: string | null;
   binding_mode?: 'single_context' | 'thread_map';
   chat_mode?: string;
   group_message_type?: string;

@@ -56,7 +56,7 @@ export interface DingTalkConnectOpts {
     chatName: string,
     code: string,
   ) => Promise<boolean>;
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: (chatJid: string, command: string, senderImId?: string) => Promise<string | null>;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -64,7 +64,8 @@ export interface DingTalkConnectOpts {
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   onBotRemovedFromGroup?: (chatJid: string) => void;
-  shouldProcessGroupMessage?: (chatJid: string) => boolean;
+  shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
+  isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
 }
 
 export interface DingTalkConnection {
@@ -1381,14 +1382,32 @@ export function createDingTalkConnection(
       }
 
       // ── Group mention check ──
+      // 钉钉 Stream 只收到 @bot 消息，所以 shouldProcessGroupMessage（"bot 未被
+      // @mention 时是否放行"）语义上对钉钉不完全适用。但 owner_mentioned 模式下
+      // 它返回 false，会在 Gate 1 误丢所有群消息，导致 isGroupOwnerMessage 永远
+      // 不会执行。修复：当 shouldProcessGroupMessage 返回 false 且
+      // isGroupOwnerMessage 回调存在时，不立即丢弃，让 Gate 2 做 sender 过滤。
       if (
         isGroup &&
         opts.shouldProcessGroupMessage &&
-        !opts.shouldProcessGroupMessage(jid)
+        !opts.shouldProcessGroupMessage(jid, data.senderId) &&
+        !opts.isGroupOwnerMessage
       ) {
         logger.debug(
           { jid },
           'DingTalk group message dropped (mention required)',
+        );
+        return;
+      }
+      // owner_mentioned 模式：即使被 @mention，非 owner 的消息也丢弃
+      if (
+        isGroup &&
+        opts.isGroupOwnerMessage &&
+        !opts.isGroupOwnerMessage(jid, data.senderId)
+      ) {
+        logger.debug(
+          { jid, senderId: data.senderId },
+          'DingTalk group message dropped (owner_mentioned mode)',
         );
         return;
       }
@@ -1405,7 +1424,7 @@ export function createDingTalkConnection(
           slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
         ).trim();
         try {
-          const reply = await opts.onCommand(jid, cmdBody);
+          const reply = await opts.onCommand(jid, cmdBody, data.senderId);
           if (reply) {
             const plainText = markdownToPlainText(reply);
             if (data.sessionWebhook) {

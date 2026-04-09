@@ -443,6 +443,7 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
     group_message_type?: string;
     is_thread_capable?: boolean;
     activation_mode?: string;
+    owner_im_id?: string | null;
   }
 
   const candidates: ImGroupCandidate[] = [];
@@ -493,6 +494,7 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
         group_message_type: g.feishu_group_message_type,
       }),
       activation_mode: g.activation_mode,
+      owner_im_id: g.owner_im_id ?? null,
     });
   }
 
@@ -737,6 +739,7 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   const validActivationModes = [
     'always',
     'when_mentioned',
+    'owner_mentioned',
     'auto',
     'disabled',
   ] as const;
@@ -747,6 +750,13 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
       rawActivationMode as (typeof validActivationModes)[number],
     )
       ? (rawActivationMode as (typeof validActivationModes)[number])
+      : undefined;
+
+  // Parse owner_im_id for owner_mentioned mode
+  // 如果前端传了 owner_im_id 就用，否则 owner_mentioned 模式下自动设为空（后续首条消息自动学习）
+  const ownerImId =
+    typeof body.owner_im_id === 'string' && body.owner_im_id.trim()
+      ? body.owner_im_id.trim()
       : undefined;
 
   // Update DB + in-memory cache — clear target_agent_id to avoid conflicts
@@ -762,6 +772,7 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
     ...(activationMode !== undefined
       ? { activation_mode: activationMode }
       : {}),
+    ...(ownerImId !== undefined ? { owner_im_id: ownerImId } : {}),
   };
   setRegisteredGroup(imJid, updated);
   const deps = getWebDeps();
