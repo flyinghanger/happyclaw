@@ -1281,6 +1281,14 @@ async function runQuery(
     return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery };
   }
 
+  // SystemSettings.autoCompactWindow（通过 AUTO_COMPACT_WINDOW 环境变量注入）
+  // 0 = SDK 默认（约 1M）；>0 = 通过 settings flag-layer 提前触发对话压缩
+  const autoCompactWindow = parseInt(process.env.AUTO_COMPACT_WINDOW ?? '0', 10);
+  const flagSettings: Record<string, unknown> = {};
+  if (Number.isFinite(autoCompactWindow) && autoCompactWindow > 0) {
+    flagSettings.autoCompactWindow = autoCompactWindow;
+  }
+
   try {
     const q = query({
     prompt: stream,
@@ -1299,6 +1307,7 @@ async function runQuery(
       agentProgressSummaries: true,
       settingSources: ['project', 'user'],
       includePartialMessages: true,
+      ...(Object.keys(flagSettings).length > 0 ? { settings: flagSettings as any } : {}),
       mcpServers: {
         ...loadUserMcpServers(),     // 用户配置的 MCP（stdio/http/sse），SDK 原生支持
         happyclaw: mcpServerConfig,  // 内置 SDK MCP 放最后，确保不被同名覆盖

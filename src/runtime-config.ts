@@ -3482,6 +3482,8 @@ export interface SystemSettings {
   billingCurrencyRate: number;
   // External Claude directory (admin only)
   externalClaudeDir: string;
+  // Claude Agent SDK 自动对话压缩触发点（tokens）。0 = 保留 SDK 默认（约 1M）
+  autoCompactWindow: number;
 }
 
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
@@ -3500,6 +3502,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   billingCurrency: 'USD',
   billingCurrencyRate: 1,
   externalClaudeDir: '',
+  autoCompactWindow: 0,
 };
 
 function parseIntEnv(envVar: string | undefined, fallback: number): number {
@@ -3586,6 +3589,10 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.externalClaudeDir === 'string'
         ? raw.externalClaudeDir.trim()
         : DEFAULT_SYSTEM_SETTINGS.externalClaudeDir,
+    autoCompactWindow:
+      typeof raw.autoCompactWindow === 'number' && raw.autoCompactWindow >= 0
+        ? raw.autoCompactWindow
+        : DEFAULT_SYSTEM_SETTINGS.autoCompactWindow,
   };
 }
 
@@ -3643,6 +3650,10 @@ function buildEnvFallbackSettings(): SystemSettings {
     ),
     externalClaudeDir:
       process.env.EXTERNAL_CLAUDE_DIR || DEFAULT_SYSTEM_SETTINGS.externalClaudeDir,
+    autoCompactWindow: parseIntEnv(
+      process.env.AUTO_COMPACT_WINDOW,
+      DEFAULT_SYSTEM_SETTINGS.autoCompactWindow,
+    ),
   };
 }
 
@@ -3727,6 +3738,17 @@ export function saveSystemSettings(
       DEFAULT_SYSTEM_SETTINGS.billingMinStartBalanceUsd;
   if (merged.billingMinStartBalanceUsd > 1000000)
     merged.billingMinStartBalanceUsd = 1000000;
+
+  // autoCompactWindow: 0 表示禁用（使用 SDK 默认），>0 必须在 [10000, 2000000] 范围
+  if (
+    merged.autoCompactWindow < 0 ||
+    !Number.isFinite(merged.autoCompactWindow)
+  ) {
+    merged.autoCompactWindow = 0;
+  } else if (merged.autoCompactWindow > 0) {
+    if (merged.autoCompactWindow < 10000) merged.autoCompactWindow = 10000;
+    if (merged.autoCompactWindow > 2000000) merged.autoCompactWindow = 2000000;
+  }
 
   // Validate externalClaudeDir: must be empty or an absolute directory path
   if (merged.externalClaudeDir) {

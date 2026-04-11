@@ -584,6 +584,7 @@ scripts/                      # 构建辅助脚本
 | `MAX_CONCURRENT_HOST_PROCESSES` | `5` | 宿主机模式并发上限（可通过设置页覆盖） |
 | `MAX_LOGIN_ATTEMPTS` | `5` | 登录失败锁定阈值（可通过设置页覆盖） |
 | `LOGIN_LOCKOUT_MINUTES` | `15` | 锁定持续时间（分钟）（可通过设置页覆盖） |
+| `AUTO_COMPACT_WINDOW` | `0`（禁用，使用 SDK 默认 ~1M） | Claude Agent SDK 自动对话压缩触发点（tokens），0 = 关闭，>0 范围 [10000, 2000000]（可通过设置页覆盖） |
 | `TRUST_PROXY` | `false` | 信任反向代理的 `X-Forwarded-For` 头（启用后从代理头获取客户端 IP） |
 | `TZ` | 系统时区 | 定时任务时区 |
 
