@@ -254,6 +254,8 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
               const boundToOther = isBoundToOther(group);
               const isActioning = actionLoading === group.jid;
               const cannotBindToAgent = !isMainMode && !!group.is_thread_capable;
+              const supportsActivation = isMainMode && (group.channel_type === 'feishu' || group.channel_type === 'dingtalk');
+              const effectiveMode = (activationModes[group.jid] || group.activation_mode || 'auto') as string;
 
               return (
                 <div
@@ -312,7 +314,7 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
                   </div>
 
                   {/* Activation mode selector — only for main mode + unbound feishu/dingtalk group chats */}
-                  {isMainMode && (group.channel_type === 'feishu' || group.channel_type === 'dingtalk') && !boundToThis && !boundToOther && (
+                  {supportsActivation && !boundToThis && !boundToOther && (
                     <div className="flex-shrink-0 flex flex-col items-end gap-1">
                       <select
                         value={activationModes[group.jid] || 'auto'}
@@ -323,13 +325,13 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
                           <option key={o.value} value={o.value}>{o.label}</option>
                         ))}
                       </select>
-                      {(activationModes[group.jid] || 'auto') === 'owner_mentioned' && (
+                      {effectiveMode === 'owner_mentioned' && (
                         <span className="text-[10px] text-amber-600 dark:text-amber-400 flex items-start gap-0.5 max-w-[140px] leading-tight">
                           <Info className="w-3 h-3 flex-shrink-0 mt-px" />
                           绑定后需在群里发 /owner_mention 注册身份
                         </span>
                       )}
-                      {(activationModes[group.jid] || 'auto') === 'auto' && (
+                      {effectiveMode === 'auto' && (
                         <span className="text-[10px] text-muted-foreground flex items-start gap-0.5 max-w-[140px] leading-tight">
                           兼容旧版设置，按需响应消息
                         </span>
@@ -340,10 +342,10 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
                   {/* Action button — three states: unbind / rebind / bind */}
                   {boundToThis ? (
                     <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                      {isMainMode && (group.channel_type === 'feishu' || group.channel_type === 'dingtalk') && (
+                      {supportsActivation && (
                         <div className="flex items-center gap-1.5">
                           <select
-                            value={activationModes[group.jid] || group.activation_mode || 'auto'}
+                            value={effectiveMode}
                             onChange={(e) => handleActivationModeChange(group.jid, e.target.value)}
                             className="text-xs px-1.5 py-1 rounded border border-border bg-background text-foreground"
                           >
@@ -353,16 +355,13 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
                           </select>
                         </div>
                       )}
-                      {isMainMode && (group.channel_type === 'feishu' || group.channel_type === 'dingtalk') &&
-                        (activationModes[group.jid] || group.activation_mode || 'auto') === 'owner_mentioned' &&
-                        !group.owner_im_id && (
+                      {supportsActivation && effectiveMode === 'owner_mentioned' && !group.owner_im_id && (
                         <span className="text-[10px] text-amber-600 dark:text-amber-400 flex items-start gap-0.5 max-w-[140px] leading-tight">
                           <Info className="w-3 h-3 flex-shrink-0 mt-px" />
                           请在群里发 /owner_mention 注册身份
                         </span>
                       )}
-                      {isMainMode && (group.channel_type === 'feishu' || group.channel_type === 'dingtalk') &&
-                        (activationModes[group.jid] || group.activation_mode || 'auto') === 'auto' && (
+                      {supportsActivation && effectiveMode === 'auto' && (
                         <span className="text-[10px] text-muted-foreground flex items-start gap-0.5 max-w-[140px] leading-tight">
                           兼容旧版设置，按需响应消息
                         </span>

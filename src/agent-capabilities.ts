@@ -7,9 +7,12 @@
  * on the results.
  */
 
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import os from 'os';
 import { logger } from './logger.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface AgentCapability {
   /** Human-readable name */
@@ -57,9 +60,9 @@ export const AGENT_CAPABILITIES: AgentCapability[] = [
   },
 ];
 
-function isBinaryAvailable(binary: string): boolean {
+async function isBinaryAvailable(binary: string): Promise<boolean> {
   try {
-    execFileSync('which', [binary], { stdio: 'pipe', timeout: 5_000 });
+    await execFileAsync('which', [binary], { timeout: 5_000 });
     return true;
   } catch {
     return false;
@@ -74,13 +77,20 @@ export interface CapabilityCheckResult {
 }
 
 /** Detect which agent capabilities are present on the host. */
-export function checkHostCapabilities(): CapabilityCheckResult {
+export async function checkHostCapabilities(): Promise<CapabilityCheckResult> {
+  const results = await Promise.all(
+    AGENT_CAPABILITIES.map(async (cap) => ({
+      cap,
+      available: await isBinaryAvailable(cap.binary),
+    })),
+  );
+
   const available: AgentCapability[] = [];
   const missing: AgentCapability[] = [];
   const envVars: Record<string, string> = {};
 
-  for (const cap of AGENT_CAPABILITIES) {
-    if (isBinaryAvailable(cap.binary)) {
+  for (const { cap, available: ok } of results) {
+    if (ok) {
       available.push(cap);
       if (cap.envVars) Object.assign(envVars, cap.envVars);
       const platformVars = cap.platformEnvVars?.[os.platform()];

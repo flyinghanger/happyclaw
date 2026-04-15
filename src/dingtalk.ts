@@ -205,45 +205,6 @@ function parseDingTalkChatId(
 return null;
 }
 
-/**
- * Create a DingTalk streaming card session for proactive messaging.
- * This is a standalone function that can be called from sendMessage when
- * senderStaffId is not available for C2C chats.
- */
-async function createDingTalkStreamingCardForChat(
-  config: DingTalkConnectionConfig,
-  lastSenderStaffIds: Map<string, string>,
-  chatId: string,
-  onCardCreated?: (messageId: string) => void,
-): Promise<import('./dingtalk-streaming-card.js').DingTalkStreamingCardController | undefined> {
-  const parsed = parseDingTalkChatId(chatId);
-  if (!parsed) return undefined;
-
-  const { DingTalkStreamingCardController } =
-    await import('./dingtalk-streaming-card.js');
-
-  const jidKey =
-    parsed.type === 'c2c'
-      ? `dingtalk:c2c:${parsed.conversationId}`
-      : `dingtalk:group:${parsed.conversationId}`;
-
-  const target =
-    parsed.type === 'c2c'
-      ? {
-          type: 'user' as const,
-          userId: lastSenderStaffIds.get(jidKey) ?? parsed.conversationId,
-        }
-      : {
-          type: 'group' as const,
-          openConversationId: parsed.conversationId,
-        };
-
-  return new DingTalkStreamingCardController(config, target, {
-    onCardCreated,
-    // No fallbackSend - we're using this for proactive sends without incoming message context
-  });
-}
-
 // ─── Factory Function ───────────────────────────────────────────
 
 export function createDingTalkConnection(
@@ -283,6 +244,40 @@ export function createDingTalkConnection(
     { name: string; expiresAt: number }
   >();
   const GROUP_NAME_CACHE_TTL = 60 * 60 * 1000;
+
+  // ── Streaming card helper (shared between sendMessage fallback and createStreamingSession) ──
+
+  async function buildStreamingCard(
+    chatId: string,
+    onCardCreated?: (messageId: string) => void,
+    fallbackSend?: (text: string) => Promise<void>,
+  ): Promise<import('./dingtalk-streaming-card.js').DingTalkStreamingCardController | undefined> {
+    const parsed = parseDingTalkChatId(chatId);
+    if (!parsed) return undefined;
+
+    const { DingTalkStreamingCardController } =
+      await import('./dingtalk-streaming-card.js');
+
+    const jidKey =
+      parsed.type === 'c2c'
+        ? `dingtalk:c2c:${parsed.conversationId}`
+        : `dingtalk:group:${parsed.conversationId}`;
+    const target =
+      parsed.type === 'c2c'
+        ? {
+            type: 'user' as const,
+            userId: lastSenderStaffIds.get(jidKey) ?? parsed.conversationId,
+          }
+        : {
+            type: 'group' as const,
+            openConversationId: parsed.conversationId,
+          };
+
+    return new DingTalkStreamingCardController(config, target, {
+      onCardCreated,
+      ...(fallbackSend ? { fallbackSend } : {}),
+    });
+  }
 
   // Ack reaction per chat (emoji reaction on user's message to confirm receipt)
   const ackReactionByChat = new Map<
@@ -438,6 +433,11 @@ export function createDingTalkConnection(
     const cached = groupNameCache.get(openConversationId);
     if (cached && now < cached.expiresAt) {
       return cached.name;
+    }
+
+    // Evict expired entries on cache miss
+    for (const [key, val] of groupNameCache) {
+      if (now >= val.expiresAt) groupNameCache.delete(key);
     }
 
     try {
@@ -1827,6 +1827,7 @@ export function createDingTalkConnection(
       sessionWebhookExpiry.clear();
       lastSenderIds.clear();
       lastSenderStaffIds.clear();
+      groupNameCache.clear();
       logger.info('DingTalk bot disconnected');
     },
 
@@ -1865,11 +1866,7 @@ export function createDingTalkConnection(
             'DingTalk sendMessage: no senderStaffId for C2C, trying AI Card',
           );
           try {
-            const card = await createDingTalkStreamingCardForChat(
-              config,
-              lastSenderStaffIds,
-              chatId,
-            );
+            const card = await buildStreamingCard(chatId);
             if (card) {
               card.append(text);
               await card.complete(text);
@@ -2182,35 +2179,8 @@ export function createDingTalkConnection(
       | import('./dingtalk-streaming-card.js').DingTalkStreamingCardController
       | undefined
     > {
-      const parsed = parseDingTalkChatId(chatId);
-      if (!parsed) return undefined;
-
-      const { DingTalkStreamingCardController } =
-        await import('./dingtalk-streaming-card.js');
-
-      // For C2C: use senderStaffId (enterprise staff ID) instead of encrypted senderId.
-      // DingTalk Stream SDK returns senderId in encrypted format ($:LWCP_v1:$xxx)
-      // which the AI Card deliver API rejects with "spaceId is illegal".
-      const jidKey =
-        parsed.type === 'c2c'
-          ? `dingtalk:c2c:${parsed.conversationId}`
-          : `dingtalk:group:${parsed.conversationId}`;
-      const target =
-        parsed.type === 'c2c'
-          ? {
-              type: 'user' as const,
-              userId: lastSenderStaffIds.get(jidKey) ?? parsed.conversationId,
-            }
-          : {
-              type: 'group' as const,
-              openConversationId: parsed.conversationId,
-            };
-
-      return new DingTalkStreamingCardController(config, target, {
-        onCardCreated,
-        fallbackSend: async (text: string) => {
-          await connection.sendMessage(chatId, text);
-        },
+      return buildStreamingCard(chatId, onCardCreated, async (text: string) => {
+        await connection.sendMessage(chatId, text);
       });
     },
   };

@@ -78,6 +78,7 @@ import {
   updateAgentContextInfo,
   updateChatName,
 } from './db.js';
+import { markdownToPlainText } from './im-utils.js';
 import { isSessionExpired } from './auth.js';
 import type {
   NewMessage,
@@ -384,22 +385,15 @@ async function handleWebUserMessage(
 
 /** Extract a short title from the first user message content. */
 function generateAutoTitle(content: string): string | null {
-  let text = content.trim();
-  if (!text || text.startsWith('/')) return null;
+  const trimmed = content.trim();
+  if (!trimmed || trimmed.startsWith('/')) return null;
 
-  // Strip markdown formatting
-  text = text
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/`[^`]+`/g, (m) => m.slice(1, -1))
-    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/[#*_~>|]/g, '')
+  const text = markdownToPlainText(trimmed)
     .replace(/\n+/g, ' ')
     .trim();
 
   if (!text) return null;
 
-  // Take first line
   const firstLine = text.split('\n')[0].trim();
   if (!firstLine) return null;
 

@@ -1277,7 +1277,7 @@ export async function runHostAgent(
     }
 
     // 5b. Host capability preflight — detect external tools & inject env vars
-    const capResult = checkHostCapabilities();
+    const capResult = await checkHostCapabilities();
     logCapabilityPreflight(group.name, capResult);
     for (const [key, value] of Object.entries(capResult.envVars)) {
       if (!hostEnv[key]) hostEnv[key] = value;

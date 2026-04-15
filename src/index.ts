@@ -6440,11 +6440,12 @@ function buildOnNewChat(
     if (existing) {
       // Already owned by this user — update name if changed (IM channel may now have real group name)
       if (existing.created_by === userId) {
-        if (existing.name !== chatName) {
-          existing.name = chatName;
+        const trimmed = chatName.trim();
+        if (trimmed && existing.name !== trimmed) {
+          existing.name = trimmed;
           setRegisteredGroup(chatJid, existing);
           registeredGroups[chatJid] = existing;
-          logger.debug({ chatJid, chatName }, 'Updated IM group name (buildOnNewChat)');
+          logger.debug({ chatJid, chatName: trimmed }, 'Updated IM group name (buildOnNewChat)');
         }
         return;
       }

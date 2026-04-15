@@ -16,6 +16,7 @@ import {
   setRegisteredGroup,
   updateChatName,
   getAgent,
+  VALID_ACTIVATION_MODES,
 } from '../db.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
 import {
@@ -2616,20 +2617,12 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
   }
 
   // Parse activation_mode for activation-only update
-  const validActivationModes = [
-    'always',
-    'when_mentioned',
-    'owner_mentioned',
-    'auto',
-    'disabled',
-  ] as const;
   const rawActivationMode = body.activation_mode;
   const activationMode =
     typeof rawActivationMode === 'string' &&
-    validActivationModes.includes(
-      rawActivationMode as (typeof validActivationModes)[number],
-    )
-      ? (rawActivationMode as (typeof validActivationModes)[number])
+    VALID_ACTIVATION_MODES.has(rawActivationMode)
+      ? (rawActivationMode as typeof rawActivationMode &
+          'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled')
       : undefined;
 
   // Parse owner_im_id for owner_mentioned mode
