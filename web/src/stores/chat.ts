@@ -184,7 +184,7 @@ interface ChatState {
   selectGroup: (jid: string) => void;
   loadMessages: (jid: string, loadMore?: boolean) => Promise<void>;
   refreshMessages: (jid: string) => Promise<void>;
-  sendMessage: (jid: string, content: string, attachments?: Array<{ data: string; mimeType: string }>) => Promise<void>;
+  sendMessage: (jid: string, content: string, attachments?: Array<{ data: string; mimeType: string }>) => Promise<boolean>;
   stopGroup: (jid: string) => Promise<boolean>;
   interruptQuery: (jid: string) => Promise<boolean>;
   resetSession: (jid: string, agentId?: string) => Promise<boolean>;
@@ -212,7 +212,7 @@ interface ChatState {
   createConversation: (jid: string, name?: string, description?: string) => Promise<AgentInfo | null>;
   renameConversation: (jid: string, agentId: string, name: string) => Promise<boolean>;
   loadAgentMessages: (jid: string, agentId: string, loadMore?: boolean) => Promise<void>;
-  sendAgentMessage: (jid: string, agentId: string, content: string, attachments?: Array<{ data: string; mimeType: string }>) => void;
+  sendAgentMessage: (jid: string, agentId: string, content: string, attachments?: Array<{ data: string; mimeType: string }>) => boolean;
   refreshAgentMessages: (jid: string, agentId: string) => Promise<void>;
   // Runner state sync
   handleRunnerState: (chatJid: string, state: string) => void;
@@ -960,46 +960,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       const data = await api.post<{ success: boolean; messageId: string; timestamp: string }>('/api/messages', body);
-      if (data.success) {
-        // Add user message to local state immediately
-        const authState = useAuthStore.getState();
-        const sender = authState.user?.id || 'web-user';
-        const senderName = authState.user?.display_name || authState.user?.username || 'Web';
-        const msg: Message = {
-          id: data.messageId,
-          chat_jid: jid,
-          sender,
-          sender_name: senderName,
-          content,
-          // Use server timestamp so incremental polling cursor stays monotonic with backend data.
-          timestamp: data.timestamp,
-          // is_from_me is from the bot's perspective: true = bot sent it, false = human sent it
-          is_from_me: false,
-          attachments: body.attachments ? JSON.stringify(body.attachments) : undefined,
-        };
-        set((s) => {
-          const existing = s.messages[jid] || [];
-          if (!s.messages[jid]) {
-            console.warn('[sendMessage] messages[jid] is undefined at send time', { jid, storeKeys: Object.keys(s.messages) });
-          }
-          const merged = mergeMessagesChronologically(existing, [msg]);
-          const latest = merged.length > 0 ? merged[merged.length - 1] : null;
-          const shouldWait =
-            !!latest &&
-            latest.is_from_me === false &&
-            !isTerminalSystemMessage(latest);
-          return {
-            messages: {
-              ...s.messages,
-              [jid]: merged,
-            },
-            waiting: { ...s.waiting, [jid]: shouldWait },
-            error: null,
-          };
-        });
+      if (!data.success) {
+        // Server returned non-success payload — surface as a send failure so caller can retain input.
+        const msg = '服务器返回失败，请重试';
+        set({ error: msg });
+        showToast('发送失败', msg);
+        return false;
       }
+      // Add user message to local state immediately
+      const authState = useAuthStore.getState();
+      const sender = authState.user?.id || 'web-user';
+      const senderName = authState.user?.display_name || authState.user?.username || 'Web';
+      const msg: Message = {
+        id: data.messageId,
+        chat_jid: jid,
+        sender,
+        sender_name: senderName,
+        content,
+        // Use server timestamp so incremental polling cursor stays monotonic with backend data.
+        timestamp: data.timestamp,
+        // is_from_me is from the bot's perspective: true = bot sent it, false = human sent it
+        is_from_me: false,
+        attachments: body.attachments ? JSON.stringify(body.attachments) : undefined,
+      };
+      set((s) => {
+        const existing = s.messages[jid] || [];
+        if (!s.messages[jid]) {
+          console.warn('[sendMessage] messages[jid] is undefined at send time', { jid, storeKeys: Object.keys(s.messages) });
+        }
+        const merged = mergeMessagesChronologically(existing, [msg]);
+        const latest = merged.length > 0 ? merged[merged.length - 1] : null;
+        const shouldWait =
+          !!latest &&
+          latest.is_from_me === false &&
+          !isTerminalSystemMessage(latest);
+        return {
+          messages: {
+            ...s.messages,
+            [jid]: merged,
+          },
+          waiting: { ...s.waiting, [jid]: shouldWait },
+          error: null,
+        };
+      });
+      return true;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      // 弱网/断网/后端 500 等场景：记录错误并给用户可见的 toast，
+      // 返回 false 让调用方（MessageInput）保留输入不清空。
+      const message = err instanceof Error ? err.message : String(err);
+      set({ error: message });
+      showToast('发送失败', '消息未发送，输入已保留，请检查网络后重试');
+      return false;
     }
   },
 
@@ -2089,24 +2100,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendAgentMessage: (jid, agentId, content, attachments?) => {
-    // Clear agent streaming state before sending
-    set((s) => {
-      const next = { ...s.agentStreaming };
-      delete next[agentId];
-      return { agentStreaming: next };
-    });
-    // Send via WebSocket with agentId
+    // Send via WebSocket with agentId.
+    // NOTE: 先尝试 ws.send，成功后再清 agentStreaming / 置 agentWaiting，
+    // 避免失败时 UI 进入"等待中但消息没发出"的不一致状态。
     const normalizedAttachments = attachments && attachments.length > 0
       ? attachments.map(att => ({ type: 'image' as const, ...att }))
       : undefined;
     const sent = wsManager.send({ type: 'send_message', chatJid: jid, content, agentId, attachments: normalizedAttachments });
     if (!sent) {
-      showToast('发送失败', 'WebSocket 未连接，请稍后重试');
-      return;
+      showToast('发送失败', 'WebSocket 未连接，输入已保留，请稍后重试');
+      return false;
     }
-    set((s) => ({
-      agentWaiting: { ...s.agentWaiting, [agentId]: true },
-    }));
+    set((s) => {
+      const nextAgentStreaming = { ...s.agentStreaming };
+      delete nextAgentStreaming[agentId];
+      return {
+        agentStreaming: nextAgentStreaming,
+        agentWaiting: { ...s.agentWaiting, [agentId]: true },
+      };
+    });
+    return true;
   },
 
   refreshAgentMessages: async (jid, agentId) => {

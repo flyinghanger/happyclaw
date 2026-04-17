@@ -341,8 +341,10 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const [scrollTrigger, setScrollTrigger] = useState(0);
 
   const handleSend = async (content: string, attachments?: Array<{ data: string; mimeType: string }>) => {
-    await sendMessage(groupJid, content, attachments);
-    setScrollTrigger(n => n + 1);
+    const ok = await sendMessage(groupJid, content, attachments);
+    // 只有发送成功时才触发滚动；失败时保留当前视图位置，避免用户上下文切换。
+    if (ok) setScrollTrigger(n => n + 1);
+    return ok;
   };
 
   const handleLoadMore = () => {
@@ -662,9 +664,10 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                       agentId={activeAgentTab}
                     />
                     <MessageInput
-                      onSend={async (content, attachments) => {
-                        sendAgentMessage(groupJid, activeAgentTab, content, attachments);
-                        setScrollTrigger(n => n + 1);
+                      onSend={(content, attachments) => {
+                        const ok = sendAgentMessage(groupJid, activeAgentTab, content, attachments);
+                        if (ok) setScrollTrigger(n => n + 1);
+                        return ok;
                       }}
                       groupJid={groupJid}
                       onResetSession={() => { setResetAgentId(activeAgentTab); setShowResetConfirm(true); }}
@@ -697,9 +700,10 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 agentId={activeAgentTab}
               />
               <MessageInput
-                onSend={async (content, attachments) => {
-                  sendAgentMessage(groupJid, activeAgentTab, content, attachments);
-                  setScrollTrigger(n => n + 1);
+                onSend={(content, attachments) => {
+                  const ok = sendAgentMessage(groupJid, activeAgentTab, content, attachments);
+                  if (ok) setScrollTrigger(n => n + 1);
+                  return ok;
                 }}
                 groupJid={groupJid}
                 onResetSession={() => { setResetAgentId(activeAgentTab); setShowResetConfirm(true); }}
