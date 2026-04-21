@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { Plus, X, Link, MessageSquare, Pencil, Trash2 } from 'lucide-react';
+import { Plus, Link, MessageSquare, Pencil, Trash2 } from 'lucide-react';
 import { DndContext, closestCenter, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, horizontalListSortingStrategy, arrayMove, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -33,9 +33,10 @@ interface ContextMenuState {
   y: number;
 }
 
-function ContextMenuOverlay({ menu, onRename, onDelete, onClose }: {
+function ContextMenuOverlay({ menu, onRename, onBindIm, onDelete, onClose }: {
   menu: ContextMenuState;
   onRename?: () => void;
+  onBindIm?: () => void;
   onDelete: () => void;
   onClose: () => void;
 }) {
@@ -72,6 +73,15 @@ function ContextMenuOverlay({ menu, onRename, onDelete, onClose }: {
           重命名
         </button>
       )}
+      {onBindIm && (
+        <button
+          onClick={onBindIm}
+          className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground cursor-pointer"
+        >
+          <Link className="w-3.5 h-3.5" />
+          绑定 IM 群组
+        </button>
+      )}
       <button
         onClick={onDelete}
         className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30 cursor-pointer"
@@ -83,15 +93,13 @@ function ContextMenuOverlay({ menu, onRename, onDelete, onClose }: {
   );
 }
 
-function SortableTab({ agent, isActive, onSelect, onContextMenu, onTouchStart, onTouchEnd, onBindIm, onDeleteAgent }: {
+function SortableTab({ agent, isActive, onSelect, onContextMenu, onTouchStart, onTouchEnd }: {
   agent: AgentInfo;
   isActive: boolean;
   onSelect: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
   onTouchStart: (e: React.TouchEvent) => void;
   onTouchEnd: () => void;
-  onBindIm?: (agentId: string) => void;
-  onDeleteAgent: (agentId: string) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: agent.id });
   const style = {
@@ -136,22 +144,6 @@ function SortableTab({ agent, isActive, onSelect, onContextMenu, onTouchStart, o
         </span>
       )}
       <span className="truncate max-w-[120px]">{agent.name}</span>
-      {onBindIm && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onBindIm(agent.id); }}
-          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-accent transition-all cursor-pointer"
-          title="绑定 IM 群组"
-        >
-          <Link className="w-3 h-3" />
-        </button>
-      )}
-      <button
-        onClick={(e) => { e.stopPropagation(); onDeleteAgent(agent.id); }}
-        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-accent transition-all cursor-pointer"
-        title="关闭对话"
-      >
-        <X className="w-3 h-3" />
-      </button>
     </div>
   );
 }
@@ -261,8 +253,6 @@ export function AgentTabBar({ agents, activeTab, onSelectTab, onDeleteAgent, onR
                 onContextMenu={(e) => handleContextMenu(e, agent)}
                 onTouchStart={(e) => handleTouchStart(agent, e)}
                 onTouchEnd={handleTouchEnd}
-                onBindIm={onBindIm}
-                onDeleteAgent={onDeleteAgent}
               />
             ))}
           </SortableContext>
@@ -287,6 +277,10 @@ export function AgentTabBar({ agents, activeTab, onSelectTab, onDeleteAgent, onR
           menu={contextMenu}
           onRename={onRenameAgent ? () => {
             onRenameAgent(contextMenu.agentId, contextMenu.agentName);
+            setContextMenu(null);
+          } : undefined}
+          onBindIm={onBindIm ? () => {
+            onBindIm(contextMenu.agentId);
             setContextMenu(null);
           } : undefined}
           onDelete={() => {
