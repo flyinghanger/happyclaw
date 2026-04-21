@@ -5,10 +5,6 @@ export interface StatusTheme {
   template: 'blue' | 'violet' | 'orange' | 'red';
   tagColor: 'blue' | 'violet' | 'orange' | 'red';
   tagText: string;
-  /** Feishu standard_icon token rendered in header.icon (left of the title). */
-  iconToken: string;
-  /** Icon accent color — picked to match the header template. */
-  iconColor: 'blue' | 'violet' | 'orange' | 'red' | 'white';
 }
 
 const STATUS_THEMES: Record<CardStatus, StatusTheme> = {
@@ -16,29 +12,21 @@ const STATUS_THEMES: Record<CardStatus, StatusTheme> = {
     template: 'blue',
     tagColor: 'blue',
     tagText: '生成中',
-    iconToken: 'loading_outlined',
-    iconColor: 'white',
   },
   done: {
     template: 'violet',
     tagColor: 'violet',
     tagText: '完成',
-    iconToken: 'check-circle_filled',
-    iconColor: 'white',
   },
   warning: {
     template: 'orange',
     tagColor: 'orange',
     tagText: '部分成功',
-    iconToken: 'warning_filled',
-    iconColor: 'white',
   },
   error: {
     template: 'red',
     tagColor: 'red',
     tagText: '失败',
-    iconToken: 'close-circle_filled',
-    iconColor: 'white',
   },
 };
 

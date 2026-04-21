@@ -257,7 +257,7 @@ describe('formatters', () => {
 // ─── buildAgentReplyCard shape ─────────────────────────────────
 
 describe('buildAgentReplyCard', () => {
-  test('minimal card: v2 schema + violet done template + icon', () => {
+  test('minimal card: v2 schema + violet done template', () => {
     const card = buildAgentReplyCard({ status: 'done', text: 'Hello world' });
     expect(card.schema).toBe('2.0');
     const config = card.config as Record<string, unknown>;
@@ -268,10 +268,7 @@ describe('buildAgentReplyCard', () => {
 
     const header = card.header as Record<string, unknown>;
     expect(header.template).toBe('violet');
-    // header.icon must be a v2 standard_icon
-    const icon = header.icon as Record<string, unknown>;
-    expect(icon.tag).toBe('standard_icon');
-    expect(icon.token).toBe('check-circle_filled');
+    // header.icon removed — standard_icon tokens are not supported on all clients
 
     const tags = header.text_tag_list as Array<Record<string, unknown>>;
     expect(tags.length).toBeGreaterThan(0);
@@ -282,21 +279,21 @@ describe('buildAgentReplyCard', () => {
     expect(body.direction).toBe('vertical');
   });
 
-  test('header.icon reflects CardStatus', () => {
+  test('header.template reflects CardStatus', () => {
     const cases: Array<[
       'running' | 'done' | 'warning' | 'error',
       string,
     ]> = [
-      ['running', 'loading_outlined'],
-      ['done', 'check-circle_filled'],
-      ['warning', 'warning_filled'],
-      ['error', 'close-circle_filled'],
+      ['running', 'blue'],
+      ['done', 'violet'],
+      ['warning', 'orange'],
+      ['error', 'red'],
     ];
-    for (const [status, token] of cases) {
+    for (const [status, template] of cases) {
       const card = buildAgentReplyCard({ status, text: 'x' });
       const header = card.header as Record<string, unknown>;
-      const icon = header.icon as Record<string, unknown>;
-      expect(icon.token).toBe(token);
+      expect(header.template).toBe(template);
+      expect(header.icon).toBeUndefined();
     }
   });
 
@@ -588,13 +585,10 @@ describe('buildStreamingAgentCard', () => {
     expect(body.vertical_spacing).toBe('medium');
   });
 
-  test('streaming header gets a status icon', () => {
+  test('streaming header has no icon (removed to avoid broken images)', () => {
     const card = buildStreamingAgentCard({ initialText: '' });
     const header = card.header as Record<string, unknown>;
-    const icon = header.icon as Record<string, unknown>;
-    expect(icon.tag).toBe('standard_icon');
-    // running → loading_outlined
-    expect(icon.token).toBe('loading_outlined');
+    expect(header.icon).toBeUndefined();
   });
 
   test('rich streaming card element_ids are unique', () => {

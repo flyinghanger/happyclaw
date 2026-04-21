@@ -133,11 +133,6 @@ export function buildHeader(input: AgentCardInput): El {
   const header: El = {
     title: { tag: 'plain_text', content: displayTitle },
     template: theme.template,
-    icon: {
-      tag: 'standard_icon',
-      token: theme.iconToken,
-      color: theme.iconColor,
-    },
   };
   if (input.subtitle) {
     (header as { subtitle?: unknown }).subtitle = {
