@@ -3,7 +3,6 @@ import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { successTap } from '../../hooks/useHaptic';
 import {
   ArrowUp,
-  Brush,
   FileUp,
   FolderUp,
   X,
@@ -44,7 +43,6 @@ interface MessageInputProps {
   ) => Promise<boolean> | boolean;
   groupJid?: string;
   disabled?: boolean;
-  onResetSession?: () => void;
   onToggleTerminal?: () => void;
 }
 
@@ -52,7 +50,6 @@ export function MessageInput({
   onSend,
   groupJid,
   disabled = false,
-  onResetSession,
   onToggleTerminal,
 }: MessageInputProps) {
   const [content, setContent] = useState('');
@@ -525,6 +522,30 @@ export function MessageInput({
             </div>
           )}
 
+          {/* Slash command hint — discoverability for /clear */}
+          {content.startsWith('/') && !content.includes(' ') && !content.includes('\n') && (() => {
+            const SLASH_COMMANDS = [
+              { cmd: '/clear', desc: '清除当前会话的 Claude 上下文（聊天记录不受影响）' },
+            ];
+            const matches = SLASH_COMMANDS.filter(c => c.cmd.startsWith(content));
+            if (matches.length === 0) return null;
+            return (
+              <div className="mx-3 mt-2 rounded-md border border-border bg-popover/95 backdrop-blur-sm shadow-sm overflow-hidden">
+                {matches.map((c) => (
+                  <button
+                    key={c.cmd}
+                    type="button"
+                    onClick={() => { setContent(c.cmd); textareaRef.current?.focus(); }}
+                    className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-accent transition-colors cursor-pointer"
+                  >
+                    <code className="text-sm font-mono text-teal-600 dark:text-teal-400">{c.cmd}</code>
+                    <span className="text-xs text-muted-foreground truncate">{c.desc}</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
+
           {/* Textarea */}
           <div className="px-4 pt-3 pb-1">
             <textarea
@@ -564,16 +585,6 @@ export function MessageInput({
                   aria-label="添加文件"
                 >
                   <Paperclip className="w-4.5 h-4.5" />
-                </button>
-              )}
-              {onResetSession && (
-                <button
-                  type="button"
-                  onClick={onResetSession}
-                  className="w-10 h-10 rounded-lg flex items-center justify-center hover:bg-amber-50 dark:hover:bg-amber-950/40 text-muted-foreground hover:text-amber-600 dark:hover:text-amber-400 transition-all cursor-pointer"
-                  title="清除上下文"
-                >
-                  <Brush className="w-4.5 h-4.5" />
                 </button>
               )}
               {onToggleTerminal && (

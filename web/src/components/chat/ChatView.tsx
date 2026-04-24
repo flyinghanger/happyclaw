@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { toast } from 'sonner';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { MessageList } from './MessageList';
@@ -8,7 +7,6 @@ import { MessageInput } from './MessageInput';
 import { FilePanel } from './FilePanel';
 import { ContainerEnvPanel } from './ContainerEnvPanel';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { PromptDialog } from '@/components/common/PromptDialog';
 import { ArrowLeft, FolderOpen, Link, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Puzzle, Server, Sun, Terminal, Users, Variable, X } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
@@ -60,9 +58,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const [mobilePanel, setMobilePanel] = useState<SidebarTab | null>(null);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('files');
   const [panelOpen, setPanelOpen] = useState(false);
-  const [showResetConfirm, setShowResetConfirm] = useState(false);
-  const [resetLoading, setResetLoading] = useState(false);
-  const [resetAgentId, setResetAgentId] = useState<string | null>(null);
   // Desktop: visible controls panel height, mounted controls terminal lifecycle.
   const [terminalVisible, setTerminalVisible] = useState(false);
   const [terminalMounted, setTerminalMounted] = useState(false);
@@ -101,7 +96,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const refreshMessages = useChatStore(s => s.refreshMessages);
   const sendMessage = useChatStore(s => s.sendMessage);
   const interruptQuery = useChatStore(s => s.interruptQuery);
-  const resetSession = useChatStore(s => s.resetSession);
   const handleStreamEvent = useChatStore(s => s.handleStreamEvent);
   const handleWsNewMessage = useChatStore(s => s.handleWsNewMessage);
   const handleStreamSnapshot = useChatStore(s => s.handleStreamSnapshot);
@@ -351,17 +345,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const handleLoadMore = () => {
     if (hasMoreMessages && !loading) {
       loadMessages(groupJid, true);
-    }
-  };
-
-  const handleResetSession = async () => {
-    setResetLoading(true);
-    const ok = await resetSession(groupJid, resetAgentId ?? undefined);
-    setResetLoading(false);
-    setShowResetConfirm(false);
-    setResetAgentId(null);
-    if (!ok) {
-      toast.error('清除上下文失败，请稍后重试');
     }
   };
 
@@ -674,7 +657,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                         return ok;
                       }}
                       groupJid={groupJid}
-                      onResetSession={() => { setResetAgentId(activeAgentTab); setShowResetConfirm(true); }}
                     />
                   </>
                 ) : (
@@ -710,7 +692,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                   return ok;
                 }}
                 groupJid={groupJid}
-                onResetSession={() => { setResetAgentId(activeAgentTab); setShowResetConfirm(true); }}
               />
             </>
           ) : (
@@ -730,7 +711,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               <MessageInput
                 onSend={handleSend}
                 groupJid={groupJid}
-                onResetSession={() => { setResetAgentId(null); setShowResetConfirm(true); }}
                 onToggleTerminal={canUseTerminal ? handleTerminalToggle : undefined}
               />
             </>
@@ -964,21 +944,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           </div>
         </SheetContent>
       </Sheet>
-
-      {/* Reset session confirm dialog */}
-      <ConfirmDialog
-        open={showResetConfirm}
-        onClose={() => setShowResetConfirm(false)}
-        onConfirm={handleResetSession}
-        title="清除上下文"
-        message={resetAgentId
-          ? '将清除该子对话的 Claude 会话上下文，下次发送消息时将开始全新会话。聊天记录不受影响。'
-          : '将清除主会话的 Claude 上下文并停止运行中的主工作区进程，下次发送消息时将开始全新会话。聊天记录和子对话不受影响。'
-        }
-        confirmText="清除"
-        confirmVariant="danger"
-        loading={resetLoading}
-      />
 
       {/* IM binding dialog */}
       {bindingAgentId && (
