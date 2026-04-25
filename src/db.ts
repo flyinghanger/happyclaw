@@ -1236,7 +1236,19 @@ export function initDatabase(): void {
     db.exec('ALTER TABLE agents ADD COLUMN spawned_from_jid TEXT');
   }
 
-  const SCHEMA_VERSION = '36';
+  // v36 → v37: Add provider_id to sessions table for sticky provider binding.
+  // Prevents "Invalid signature in thinking block" errors when a Claude session
+  // resumed across container restarts gets routed to a different OAuth account.
+  if (
+    !db
+      .prepare("PRAGMA table_info('sessions')")
+      .all()
+      .some((c: any) => c.name === 'provider_id')
+  ) {
+    db.exec('ALTER TABLE sessions ADD COLUMN provider_id TEXT');
+  }
+
+  const SCHEMA_VERSION = '37';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2213,6 +2225,46 @@ export function deleteSession(
   db.prepare(
     'DELETE FROM sessions WHERE group_folder = ? AND agent_id = ?',
   ).run(groupFolder, effectiveAgentId);
+}
+
+/**
+ * Get the provider_id bound to a session (group_folder + agent_id).
+ * Returns undefined if no row or no binding recorded.
+ *
+ * Used by ProviderPool sticky-selection: when resuming a Claude session that
+ * already produced thinking blocks, route back to the same provider/account so
+ * thinking-block signatures validate.
+ */
+export function getSessionProviderId(
+  groupFolder: string,
+  agentId?: string | null,
+): string | undefined {
+  const effectiveAgentId = agentId || '';
+  const row = db
+    .prepare(
+      'SELECT provider_id FROM sessions WHERE group_folder = ? AND agent_id = ?',
+    )
+    .get(groupFolder, effectiveAgentId) as
+    | { provider_id: string | null }
+    | undefined;
+  return row?.provider_id ?? undefined;
+}
+
+/**
+ * Bind a session to a specific provider_id, or clear the binding (provider_id=null).
+ * Upserts a sessions row if one does not yet exist (with empty session_id).
+ */
+export function setSessionProviderId(
+  groupFolder: string,
+  agentId: string | null | undefined,
+  providerId: string | null,
+): void {
+  const effectiveAgentId = agentId || '';
+  db.prepare(
+    `INSERT INTO sessions (group_folder, session_id, agent_id, provider_id)
+     VALUES (?, '', ?, ?)
+     ON CONFLICT(group_folder, agent_id) DO UPDATE SET provider_id = excluded.provider_id`,
+  ).run(groupFolder, effectiveAgentId, providerId);
 }
 
 export function deleteAllSessionsForFolder(groupFolder: string): void {

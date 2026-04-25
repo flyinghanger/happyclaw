@@ -324,7 +324,7 @@ SQLite WAL 模式，Schema 经历 v1→v24 演进（`db.ts` 中的 `SCHEMA_VERSI
 | `scheduled_tasks` | `id` | 定时任务（调度类型、上下文模式、状态、`execution_type`、`script_command`、`created_by`） |
 | `task_run_logs` | `id` (auto) | 任务执行日志（耗时、状态、结果） |
 | `registered_groups` | `jid` | 注册的会话（folder 映射、容器配置、执行模式、`customCwd`、`is_home`、`init_source_path`、`init_git_url`、`selected_skills`、`require_mention`） |
-| `sessions` | `(group_folder, agent_id)` | 会话 ID 映射（Claude session 持久化，支持 Sub-Agent 独立会话） |
+| `sessions` | `(group_folder, agent_id)` | 会话 ID 映射（Claude session 持久化，支持 Sub-Agent 独立会话；`provider_id` 字段用于 ProviderPool sticky 选择，避免跨 OAuth 账号 thinking block 签名失效） |
 | `router_state` | `key` | KV 存储（`last_timestamp`、`last_agent_timestamp`） |
 | `users` | `id` | 用户账户（密码哈希、角色、权限、状态、`ai_name`、`ai_avatar_emoji`、`ai_avatar_color`、`avatar_emoji`、`avatar_color`、`ai_avatar_url`、`deleted_at`） |
 | `user_sessions` | `id` | 登录会话（token、过期时间、最后活跃） |

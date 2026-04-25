@@ -33,6 +33,7 @@ import {
   writeCredentialsFile,
 } from './runtime-config.js';
 import { providerPool } from './provider-pool.js';
+import { getSessionProviderId, setSessionProviderId } from './db.js';
 import { isApiError } from './agent-output-parser.js';
 import type { ClaudeProviderConfig } from './runtime-config.js';
 import { loadUserMcpServers } from './mcp-utils.js';
@@ -254,9 +255,18 @@ export function setProviderOverride(groupFolder: string, providerId: string): vo
  * or null if no providers are enabled / group has env-level provider override / selection fails.
  * For single-provider setups, returns the provider for display without pool balancing.
  * One-time overrides (from switchProvider) are consumed on use.
+ *
+ * Session-sticky binding (when groupFolder + agentId identifies a resumable Claude
+ * session): if the session has a previously-bound provider that is still enabled,
+ * prefer it over load-balancing. This prevents "Invalid signature in thinking
+ * block" 400 errors when a conversation that produced thinking blocks under
+ * provider A gets resumed in a fresh container that the pool routes to provider B
+ * (different OAuth account / API key). Each successful selection updates the
+ * binding via setSessionProviderId().
  */
 function trySelectPoolProvider(
   groupFolder: string,
+  agentId?: string | null,
 ): { profileId: string; resolved: ResolvedProvider } | null {
   const override = getContainerEnvConfig(groupFolder);
   const hasOverride = !!(
@@ -273,6 +283,8 @@ function trySelectPoolProvider(
     try {
       const resolved = resolveProviderById(overrideProviderId);
       providerPool.acquireSession(overrideProviderId);
+      // Override path also updates sticky binding so subsequent runs follow.
+      setSessionProviderId(groupFolder, agentId, overrideProviderId);
       logger.info(
         { groupFolder, providerId: overrideProviderId },
         'Using one-time provider override',
@@ -290,11 +302,44 @@ function trySelectPoolProvider(
   const enabledProviders = getEnabledProviders();
   if (enabledProviders.length === 0) return null;
 
+  // Sticky path: respect previous session→provider binding when the bound
+  // provider is still enabled. Skip when only one provider exists (single
+  // provider already gives stickiness implicitly).
+  if (enabledProviders.length > 1) {
+    const boundId = getSessionProviderId(groupFolder, agentId);
+    if (boundId && enabledProviders.some((p) => p.id === boundId)) {
+      try {
+        const resolved = resolveProviderById(boundId);
+        providerPool.acquireSession(boundId);
+        logger.debug(
+          { groupFolder, agentId: agentId || null, providerId: boundId },
+          'Reusing sticky provider binding for resumed session',
+        );
+        return {
+          profileId: boundId,
+          resolved: { config: resolved.config, customEnv: resolved.customEnv },
+        };
+      } catch (err) {
+        logger.warn(
+          { err, providerId: boundId },
+          'Sticky provider resolution failed, falling back to pool selection',
+        );
+      }
+    } else if (boundId) {
+      // Bound provider was disabled or removed — fall through and pick a fresh one.
+      logger.info(
+        { groupFolder, agentId: agentId || null, providerId: boundId },
+        'Sticky provider no longer enabled, falling back to pool selection',
+      );
+    }
+  }
+
   // Single provider: return its ID for display, acquire session for consistency
   if (enabledProviders.length === 1) {
     try {
       const resolved = resolveProviderById(enabledProviders[0].id);
       providerPool.acquireSession(enabledProviders[0].id);
+      setSessionProviderId(groupFolder, agentId, enabledProviders[0].id);
       return {
         profileId: enabledProviders[0].id,
         resolved: { config: resolved.config, customEnv: resolved.customEnv },
@@ -311,6 +356,7 @@ function trySelectPoolProvider(
     const profileId = providerPool.selectProvider();
     const resolved = resolveProviderById(profileId);
     providerPool.acquireSession(profileId);
+    setSessionProviderId(groupFolder, agentId, profileId);
     return {
       profileId,
       resolved: { config: resolved.config, customEnv: resolved.customEnv },
@@ -680,7 +726,7 @@ export async function runContainerAgent(
   mkdirForContainer(groupDir);
 
   // ─── Provider Pool selection ───
-  const poolResult = trySelectPoolProvider(group.folder);
+  const poolResult = trySelectPoolProvider(group.folder, input.agentId);
   const selectedProfileId = poolResult?.profileId ?? null;
   const resolvedProvider = poolResult?.resolved;
 
@@ -1236,7 +1282,7 @@ export async function runHostAgent(
 
   // ─── Provider Pool selection (host mode) ───
   const containerOverride = getContainerEnvConfig(group.folder);
-  const hostPoolResult = trySelectPoolProvider(group.folder);
+  const hostPoolResult = trySelectPoolProvider(group.folder, input.agentId);
   const hostSelectedProfileId = hostPoolResult?.profileId ?? null;
   const globalConfig = hostPoolResult?.resolved.config ?? getClaudeProviderConfig();
 
