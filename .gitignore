@@ -53,6 +53,19 @@ skills-lock.json
 log/
 .playwright-mcp/
 
+# Personal Obsidian / Excalidraw workspace (per-developer, not project assets)
+.obsidian/
+.obsidian.bak/
+Excalidraw/
+
+# Manual snapshot directories from /clear or reset operations
+.clear-backup-*/
+
+# Per-developer skill symlinks pointing to ~/.claude/skills/
+# (Project-level skills under container/skills/ are tracked as real directories)
+/container/skills/diagram-engineering
+/container/skills/ip
+
 # OS
 .DS_Store
 Thumbs.db
