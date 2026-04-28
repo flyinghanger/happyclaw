@@ -4680,13 +4680,22 @@ function startIpcWatcher(): void {
         });
 
         // 清理孤儿结果文件（容器崩溃或超时后残留，超过 10 分钟自动删除）
+        const RESULT_FILE_PREFIXES = [
+          'install_skill_result_',
+          'uninstall_skill_result_',
+          'list_tasks_result_',
+          'discord_get_history_result_',
+          'discord_get_channel_info_result_',
+          'discord_get_server_info_result_',
+        ];
+        const isResultFile = (name: string) =>
+          RESULT_FILE_PREFIXES.some((p) => name.startsWith(p));
+
         for (const entry of allEntries) {
           if (
             entry.isFile() &&
             entry.name.endsWith('.json') &&
-            (entry.name.startsWith('install_skill_result_') ||
-              entry.name.startsWith('uninstall_skill_result_') ||
-              entry.name.startsWith('list_tasks_result_'))
+            isResultFile(entry.name)
           ) {
             try {
               const filePath = path.join(tasksDir, entry.name);
@@ -4695,7 +4704,7 @@ function startIpcWatcher(): void {
                 await fsp.unlink(filePath);
                 logger.debug(
                   { sourceGroup, file: entry.name },
-                  'Cleaned up stale skill result file',
+                  'Cleaned up stale result file',
                 );
               }
             } catch {
@@ -4709,9 +4718,7 @@ function startIpcWatcher(): void {
             (entry) =>
               entry.isFile() &&
               entry.name.endsWith('.json') &&
-              !entry.name.startsWith('install_skill_result_') &&
-              !entry.name.startsWith('uninstall_skill_result_') &&
-              !entry.name.startsWith('list_tasks_result_'),
+              !isResultFile(entry.name),
           )
           .map((entry) => entry.name);
         for (const file of taskFiles) {
@@ -4828,6 +4835,9 @@ async function processTaskIpc(
     fileName?: string;
     // For list_tasks
     isAdminHome?: boolean;
+    // For discord_get_history
+    limit?: number;
+    before?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isAdminHome: boolean, // Whether source is admin home container
@@ -5093,6 +5103,18 @@ async function processTaskIpc(
           logger.error({ sourceGroup, err }, 'Failed to list tasks via IPC');
         }
       }
+      break;
+
+    case 'discord_get_history':
+    case 'discord_get_channel_info':
+    case 'discord_get_server_info':
+      await handleDiscordIpcRequest(
+        data,
+        sourceGroup,
+        sourceGroupEntry,
+        isAdminHome,
+        isHome,
+      );
       break;
 
     case 'refresh_groups':
@@ -5424,6 +5446,107 @@ async function processTaskIpc(
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
+  }
+}
+
+/**
+ * Handle Discord-specific IPC requests (history, channel info, server info).
+ * Writes a result file `{type}_result_{requestId}.json` back to the source group's tasks dir.
+ * Authorization: target chatJid must be owned by sourceGroup's user (or admin home for cross-group).
+ */
+async function handleDiscordIpcRequest(
+  data: {
+    type: string;
+    chatJid?: string;
+    requestId?: string;
+    limit?: number;
+    before?: string;
+  },
+  sourceGroup: string,
+  sourceGroupEntry: RegisteredGroup | undefined,
+  isAdminHome: boolean,
+  isHome: boolean,
+): Promise<void> {
+  const requestId = data.requestId;
+  if (!requestId || !SAFE_REQUEST_ID_RE.test(requestId)) {
+    logger.warn(
+      { sourceGroup, type: data.type, requestId },
+      'Rejected Discord IPC request with invalid requestId',
+    );
+    return;
+  }
+
+  const tasksDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'tasks');
+  const tasksDirResolved = path.resolve(tasksDir);
+  const resultFileName = `${data.type}_result_${requestId}.json`;
+  const resultFilePath = path.resolve(tasksDir, resultFileName);
+  if (!resultFilePath.startsWith(`${tasksDirResolved}${path.sep}`)) {
+    logger.warn(
+      { sourceGroup, type: data.type, resultFilePath },
+      'Rejected Discord IPC request with unsafe result file path',
+    );
+    return;
+  }
+  fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
+
+  const writeResult = (payload: object): void => {
+    const tmpPath = `${resultFilePath}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(payload));
+    fs.renameSync(tmpPath, resultFilePath);
+  };
+
+  try {
+    const chatJid = data.chatJid;
+    if (!chatJid || !chatJid.startsWith('discord:')) {
+      writeResult({
+        success: false,
+        error: 'chatJid must be a Discord JID (discord:*)',
+      });
+      return;
+    }
+
+    // Authorization: target jid must be a registered group owned by the source user.
+    const targetGroup = registeredGroups[chatJid];
+    if (
+      !canSendCrossGroupMessage(
+        isAdminHome,
+        isHome,
+        sourceGroup,
+        sourceGroupEntry,
+        targetGroup,
+      )
+    ) {
+      writeResult({
+        success: false,
+        error: `Not authorized to access Discord chat ${chatJid}`,
+      });
+      return;
+    }
+
+    if (data.type === 'discord_get_history') {
+      const messages = await imManager.getDiscordHistory(chatJid, {
+        limit: data.limit,
+        before: data.before,
+      });
+      writeResult({ success: true, messages });
+    } else if (data.type === 'discord_get_channel_info') {
+      const channel = await imManager.getDiscordChannelInfo(chatJid);
+      writeResult({ success: true, channel });
+    } else if (data.type === 'discord_get_server_info') {
+      const guild = await imManager.getDiscordGuildInfo(chatJid);
+      writeResult({ success: true, guild });
+    } else {
+      writeResult({ success: false, error: `Unknown type: ${data.type}` });
+    }
+  } catch (err) {
+    logger.error(
+      { sourceGroup, type: data.type, err },
+      'Discord IPC request failed',
+    );
+    writeResult({
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
