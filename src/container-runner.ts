@@ -185,6 +185,10 @@ export interface ContainerInput {
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
+  /** Source JID of the latest message that triggered this run (e.g. `discord:123…`).
+   * Used by per-channel MCP tools (discord_*, etc.) to identify the current
+   * incoming chat. Undefined when chatJid already encodes the IM source. */
+  currentSourceJid?: string;
   /** @deprecated Use isHome + isAdminHome instead */
   isMain: boolean;
   turnId?: string;

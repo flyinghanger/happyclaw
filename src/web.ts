@@ -362,6 +362,7 @@ async function handleWebUserMessage(
       // Web messages have no IM source, so clear the IM route.
       updateRoute?.(group.folder, null);
     },
+    chatJid,
   );
   if (sendResult === 'sent') {
     pipedToActive = true;
@@ -504,6 +505,8 @@ async function handleAgentConversationMessage(
     virtualChatJid,
     formatted,
     agentImages,
+    undefined,
+    virtualChatJid,
   );
   if (agentSendResult === 'no_active') {
     // No running process — force close any stale state and start fresh.

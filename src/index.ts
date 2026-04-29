@@ -2782,6 +2782,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     | { status: 'success' | 'error' | 'closed'; error?: string }
     | undefined;
   let activeSessionId = getSession(effectiveGroup.folder) || undefined;
+  // currentSourceJid: tells the agent-runner which IM chat the latest user
+  // message came from, so per-channel MCP tools (discord_*, etc.) can detect
+  // it correctly even when the home container was originally started by a
+  // different chat (e.g. web message before the Discord one arrived).
+  const currentSourceJid =
+    missedMessages[missedMessages.length - 1]?.source_jid || chatJid;
   try {
     output = await runAgent(
       effectiveGroup,
@@ -3336,6 +3342,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       },
       imagesForAgent,
       messageTaskId,
+      currentSourceJid,
     );
   } finally {
     await setTyping(chatJid, false);
@@ -3767,6 +3774,7 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
   images?: Array<{ data: string; mimeType?: string }>,
   messageTaskId?: string,
+  currentSourceJid?: string,
 ): Promise<{ status: 'success' | 'error' | 'closed'; error?: string }> {
   const isHome = !!group.is_home;
   // For the agent-runner: isMain means this is an admin home container (full privileges)
@@ -3852,6 +3860,7 @@ async function runAgent(
           turnId,
           groupFolder: group.folder,
           chatJid,
+          currentSourceJid,
           isMain: isAdminHome,
           isHome,
           isAdminHome,
@@ -3871,6 +3880,7 @@ async function runAgent(
           turnId,
           groupFolder: group.folder,
           chatJid,
+          currentSourceJid,
           isMain: isAdminHome,
           isHome,
           isAdminHome,
@@ -5505,17 +5515,18 @@ async function handleDiscordIpcRequest(
       return;
     }
 
-    // Authorization: target jid must be a registered group owned by the source user.
+    // Authorization: read-only Discord queries — admin home, same folder, or
+    // same owner is enough. We don't require sourceGroup to be `is_home` like
+    // cross-group sends do, because querying channel/history info doesn't
+    // write into another workspace.
     const targetGroup = registeredGroups[chatJid];
-    if (
-      !canSendCrossGroupMessage(
-        isAdminHome,
-        isHome,
-        sourceGroup,
-        sourceGroupEntry,
-        targetGroup,
-      )
-    ) {
+    const ownerOk =
+      isAdminHome ||
+      (targetGroup && targetGroup.folder === sourceGroup) ||
+      (targetGroup &&
+        sourceGroupEntry?.created_by != null &&
+        targetGroup.created_by === sourceGroupEntry.created_by);
+    if (!targetGroup || !ownerOk) {
       writeResult({
         success: false,
         error: `Not authorized to access Discord chat ${chatJid}`,
@@ -6522,6 +6533,7 @@ async function startMessageLoop(): Promise<void> {
               // IPC write succeeded — update reply route for the running agent
               activeRouteUpdaters.get(group.folder)?.(lastSourceJidForRoute);
             },
+            lastSourceJidForRoute,
           );
           if (sendResult === 'sent') {
             logger.debug(
@@ -7521,12 +7533,15 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
       const images = collectMessageImages(virtualChatJid, missedMessages);
       const imagesForAgent = images.length > 0 ? images : undefined;
 
+      const lastAgentSourceJid =
+        missedMessages[missedMessages.length - 1]?.source_jid || virtualChatJid;
       const sendResult = formatted
         ? queue.sendMessage(
             virtualChatJid,
             formatted,
             imagesForAgent,
             undefined,
+            lastAgentSourceJid,
           )
         : 'no_active';
       if (sendResult === 'no_active') {
