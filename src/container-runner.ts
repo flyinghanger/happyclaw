@@ -507,6 +507,25 @@ function buildVolumeMounts(
     });
   }
 
+  // Per-user feishu-cli OAuth state (token.json + config.yaml).
+  // Without this mount, every container restart loses the user's feishu OAuth
+  // authorization, forcing re-auth every IDLE_TIMEOUT (#477).
+  if (ownerId) {
+    const userFeishuCliDir = path.join(
+      DATA_DIR,
+      'config',
+      'user-cli',
+      ownerId,
+      'feishu-cli',
+    );
+    mkdirForContainer(userFeishuCliDir);
+    mounts.push({
+      hostPath: userFeishuCliDir,
+      containerPath: '/home/node/.feishu-cli',
+      readonly: false,
+    });
+  }
+
   // Per-group IPC namespace: each group gets its own IPC directory
   // Sub-agents get their own IPC subdirectory under agents/{agentId}/
   // Isolated tasks get their own IPC subdirectory under tasks-run/{taskRunId}/
