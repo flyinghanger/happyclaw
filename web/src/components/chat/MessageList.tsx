@@ -68,7 +68,30 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
   // RAF skips its catch-up scroll, so a user-initiated smooth scroll can run
   // uninterrupted (≈500ms browser default + 100ms slack).
   const smoothScrollUntilRef = useRef(0);
+  const smoothCatchUpTimerRef = useRef<number | null>(null);
   const SMOOTH_SCROLL_LOCK_MS = 600;
+
+  const scheduleSmoothCatchUp = useCallback(() => {
+    if (smoothCatchUpTimerRef.current !== null) {
+      window.clearTimeout(smoothCatchUpTimerRef.current);
+    }
+    const delay = Math.max(0, smoothScrollUntilRef.current - Date.now()) + 16;
+    smoothCatchUpTimerRef.current = window.setTimeout(() => {
+      smoothCatchUpTimerRef.current = null;
+      if (!scrollStateRef.current.autoScroll) return;
+      const parent = parentRef.current;
+      if (!parent) return;
+      parent.scrollTo({ top: parent.scrollHeight });
+    }, delay);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (smoothCatchUpTimerRef.current !== null) {
+        window.clearTimeout(smoothCatchUpTimerRef.current);
+      }
+    };
+  }, []);
 
   // Compute flatMessages (with date headers) before virtualizer
   const flatMessages = useMemo<FlatItem[]>(() => {
@@ -198,10 +221,11 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
         if (!parent) return;
         smoothScrollUntilRef.current = Date.now() + SMOOTH_SCROLL_LOCK_MS;
         parent.scrollTo({ top: parent.scrollHeight, behavior: 'smooth' });
+        scheduleSmoothCatchUp();
       });
     }
     prevMessageCount.current = messages.length;
-  }, [messages.length, autoScroll]);
+  }, [messages.length, autoScroll, scheduleSmoothCatchUp]);
 
   // 外部触发滚到底部（发送消息后）
   useEffect(() => {
@@ -213,9 +237,10 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
         if (!parent) return;
         smoothScrollUntilRef.current = Date.now() + SMOOTH_SCROLL_LOCK_MS;
         parent.scrollTo({ top: parent.scrollHeight, behavior: 'smooth' });
+        scheduleSmoothCatchUp();
       });
     }
-  }, [scrollTrigger]);
+  }, [scrollTrigger, scheduleSmoothCatchUp]);
 
   // Fallback: 消息在挂载后加载（首次页面加载时 store 为空）
   // initialOffset 只在挂载时生效，消息后加载需要手动定位
@@ -283,7 +308,10 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
       raf = requestAnimationFrame(() => {
         raf = 0;
         // Yield to any in-progress smooth scroll so we don't snap-interrupt it.
-        if (Date.now() < smoothScrollUntilRef.current) return;
+        if (Date.now() < smoothScrollUntilRef.current) {
+          scheduleSmoothCatchUp();
+          return;
+        }
         if (!scrollStateRef.current.autoScroll) return;
         const parent = parentRef.current;
         if (!parent) return;
@@ -312,7 +340,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
       unsubscribe();
       if (raf) cancelAnimationFrame(raf);
     };
-  }, [hasStreaming, agentId, groupJid]);
+  }, [hasStreaming, agentId, groupJid, scheduleSmoothCatchUp]);
 
   const scrollToTop = useCallback(() => {
     parentRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -325,7 +353,8 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
     const parent = parentRef.current;
     if (!parent) return;
     parent.scrollTo({ top: parent.scrollHeight, behavior: 'smooth' });
-  }, []);
+    scheduleSmoothCatchUp();
+  }, [scheduleSmoothCatchUp]);
 
   const showScrollButtons = messages.length > 0;
 
