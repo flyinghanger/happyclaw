@@ -152,9 +152,14 @@ function retainThinkingCacheForMessages<V>(
   return capThinkingCache(next);
 }
 
-/** Record the moment thinking starts; idempotent within a thinking burst. */
+/** Record the moment thinking starts; resets on transition non-thinking → thinking. */
 function markThinkingStarted(prev: StreamingState, next: StreamingState): void {
-  if (prev.thinkingStartedAt == null) next.thinkingStartedAt = Date.now();
+  if (!prev.isThinking) {
+    next.thinkingStartedAt = Date.now();
+    next.thinkingDurationMs = undefined;
+  } else if (prev.thinkingStartedAt == null) {
+    next.thinkingStartedAt = Date.now();
+  }
 }
 
 /** Record the elapsed thinking duration on the transition isThinking:true → false. */

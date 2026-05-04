@@ -629,6 +629,7 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
                 thinkingExpanded={thinkingExpanded}
                 setThinkingExpanded={(v) => {
                   setThinkingExpanded(v);
+                  userToggledThinkingRef.current = true;
                   if (v) userScrolledRef.current = false;
                 }}
                 thinkingRef={thinkingRef}
