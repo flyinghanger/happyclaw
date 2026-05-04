@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
@@ -311,16 +311,15 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // On entering a workspace without ?agent=, restore the last sub-tab the
   // user was on in this workspace (per-workspace memory, persisted across
   // PWA restarts via localStorage). Stale entries (agent deleted) get cleaned.
-  const memoryRestoredRef = useRef<string | null>(null);
+  // Guarded by `params.groupFolder` so this doesn't fire when the URL is on
+  // the workspace picker (mobile back) but ChatView is still mounted with
+  // a stale `currentGroup`.
+  const params = useParams<{ groupFolder?: string }>();
   useEffect(() => {
-    if (memoryRestoredRef.current === groupJid) return;
-    if (urlAgentId) {
-      memoryRestoredRef.current = groupJid;
-      return;
-    }
+    if (!params.groupFolder) return;
+    if (urlAgentId) return;
     if (agents.length === 0) return;
     const remembered = getWorkspaceLastAgent(groupJid);
-    memoryRestoredRef.current = groupJid;
     if (!remembered) return;
     if (!agents.some((a) => a.id === remembered)) {
       setWorkspaceLastAgent(groupJid, null);
@@ -331,7 +330,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       next.set('agent', remembered);
       return next;
     }, { replace: true });
-  }, [groupJid, urlAgentId, agents, setSearchParams]);
+  }, [groupJid, urlAgentId, agents, setSearchParams, params.groupFolder]);
 
   useEffect(() => {
     setTopicFilter('');
