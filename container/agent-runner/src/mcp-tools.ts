@@ -836,6 +836,7 @@ Returns up to 100 messages per call (default 50), ordered oldest-first. Use "bef
           .describe('Number of messages to fetch (1-100, default 50)'),
         before: z
           .string()
+          .regex(/^\d{17,20}$/, 'must be a Discord snowflake')
           .optional()
           .describe(
             'Message ID (snowflake) — only return messages older than this. Use the "id" of the oldest message in your previous batch to paginate.',
