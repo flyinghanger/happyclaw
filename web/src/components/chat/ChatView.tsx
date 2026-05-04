@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
@@ -109,6 +109,21 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const agents = useChatStore(s => s.agents[groupJid] ?? EMPTY_AGENTS);
   const activeAgentTab = useChatStore(s => s.activeAgentTab[groupJid] ?? null);
   const setActiveAgentTab = useChatStore(s => s.setActiveAgentTab);
+
+  // URL `?agent=` is the source of truth for the active sub-conversation tab.
+  // Refresh, browser back/forward, route restore, and direct deep-links all
+  // converge here. `selectTab` updates the URL only; an effect below mirrors
+  // the URL value into the store for consumers that read it directly.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlAgentId = searchParams.get('agent') || null;
+  const selectTab = useCallback((id: string | null) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (id) next.set('agent', id);
+      else next.delete('agent');
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
   const loadAgents = useChatStore(s => s.loadAgents);
   const deleteAgentAction = useChatStore(s => s.deleteAgentAction);
   const agentStreaming = useChatStore(s => s.agentStreaming);
@@ -271,6 +286,24 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     loadAgents(groupJid);
   }, [groupJid, loadAgents]);
 
+  // Mirror URL → store so consumers reading activeAgentTab stay in sync.
+  useEffect(() => {
+    setActiveAgentTab(groupJid, urlAgentId);
+  }, [urlAgentId, groupJid, setActiveAgentTab]);
+
+  // If URL points to an agent that no longer exists in this workspace
+  // (e.g., deleted while we were on it, or stale deep link), strip the param.
+  useEffect(() => {
+    if (!urlAgentId) return;
+    if (agents.length === 0) return;
+    if (agents.some((a) => a.id === urlAgentId)) return;
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('agent');
+      return next;
+    }, { replace: true });
+  }, [urlAgentId, agents, setSearchParams]);
+
   useEffect(() => {
     setTopicFilter('');
   }, [groupJid]);
@@ -285,15 +318,15 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
 
   useEffect(() => {
     if (!isTopicWorkspace || !isDesktop || activeAgentTab || filteredTopicAgents.length === 0) return;
-    setActiveAgentTab(groupJid, filteredTopicAgents[0].id);
-  }, [isTopicWorkspace, isDesktop, activeAgentTab, filteredTopicAgents, groupJid, setActiveAgentTab]);
+    selectTab(filteredTopicAgents[0].id);
+  }, [isTopicWorkspace, isDesktop, activeAgentTab, filteredTopicAgents, selectTab]);
 
   useEffect(() => {
     if (!isTopicWorkspace || !activeAgentTab) return;
     const existsInTopics = topicAgents.some((agent) => agent.id === activeAgentTab);
     if (existsInTopics) return;
-    setActiveAgentTab(groupJid, isDesktop && topicAgents[0] ? topicAgents[0].id : null);
-  }, [isTopicWorkspace, activeAgentTab, topicAgents, isDesktop, groupJid, setActiveAgentTab]);
+    selectTab(isDesktop && topicAgents[0] ? topicAgents[0].id : null);
+  }, [isTopicWorkspace, activeAgentTab, topicAgents, isDesktop, selectTab]);
 
   // Load messages for conversation agent tabs
   useEffect(() => {
@@ -459,7 +492,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
 
   const handleBackAction = () => {
     if (isTopicWorkspace && !isDesktop && activeAgentTab) {
-      setActiveAgentTab(groupJid, null);
+      selectTab(null);
       return;
     }
     onBack?.();
@@ -594,7 +627,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         <AgentTabBar
           agents={agents}
           activeTab={activeAgentTab}
-          onSelectTab={(id) => setActiveAgentTab(groupJid, id)}
+          onSelectTab={(id) => selectTab(id)}
           onDeleteAgent={(id) => {
             const agent = agents.find((a) => a.id === id);
             if (agent?.linked_im_groups && agent.linked_im_groups.length > 0) {
@@ -608,7 +641,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           onRenameAgent={(id, currentName) => setRenameTarget({ agentId: id, name: currentName })}
           onCreateConversation={() => {
             createConversation(groupJid, '').then((agent) => {
-              if (agent) setActiveAgentTab(groupJid, agent.id);
+              if (agent) selectTab(agent.id);
             });
           }}
           onBindIm={setBindingAgentId}
@@ -630,7 +663,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 <TopicSidebar
                   topicAgents={filteredTopicAgents}
                   activeAgentTab={activeAgentTab}
-                  onSelectAgent={(id) => setActiveAgentTab(groupJid, id)}
+                  onSelectAgent={(id) => selectTab(id)}
                   onDeleteAgent={(id) => deleteAgentAction(groupJid, id)}
                   topicFilter={topicFilter}
                   onFilterChange={setTopicFilter}
@@ -644,7 +677,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                     {!isDesktop && (
                       <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
                         <button
-                          onClick={() => setActiveAgentTab(groupJid, null)}
+                          onClick={() => selectTab(null)}
                           className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted cursor-pointer"
                           aria-label="返回话题列表"
                         >

@@ -817,9 +817,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   clearing: {},
   agents: {},
   agentStreaming: {},
-  activeAgentTab: (() => {
-    try { return JSON.parse(sessionStorage.getItem('hc_activeAgentTabs') || '{}'); } catch { return {}; }
-  })(),
+  // Active sub-conversation tab is mirrored from URL (?agent=...) by ChatView.
+  // The store holds an in-memory copy for components that read it directly.
+  activeAgentTab: {},
   sdkTasks: {},
   sdkTaskAliases: {},
   agentMessages: {},
@@ -2148,20 +2148,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  // 切换子 Agent 标签页（持久化到 sessionStorage，刷新后恢复）
+  // 切换子 Agent 标签页（在内存中 mirror，URL 是真正的真相源）
   setActiveAgentTab: (jid, agentId) => {
     set((s) => ({
       activeAgentTab: { ...s.activeAgentTab, [jid]: agentId },
     }));
-    try {
-      const stored = JSON.parse(sessionStorage.getItem('hc_activeAgentTabs') || '{}');
-      if (agentId) {
-        stored[jid] = agentId;
-      } else {
-        delete stored[jid];
-      }
-      sessionStorage.setItem('hc_activeAgentTabs', JSON.stringify(stored));
-    } catch { /* ignore */ }
   },
 
   // -- Conversation agent actions --
