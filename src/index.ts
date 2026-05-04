@@ -125,6 +125,7 @@ import {
   applyAutoIsolateContextForGroups,
   getUserContextIsolationConfig,
 } from './im-context-isolation.js';
+import { canSendCrossGroupMessage as canSendCrossGroupMessagePure } from './cross-group-acl.js';
 import { invalidateSessionCache, getWebDeps } from './web-context.js';
 import {
   getFeishuProviderConfigWithSource,
@@ -2782,6 +2783,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     | { status: 'success' | 'error' | 'closed'; error?: string }
     | undefined;
   let activeSessionId = getSession(effectiveGroup.folder) || undefined;
+  // currentSourceJid: tells the agent-runner which IM chat the latest user
+  // message came from, so per-channel MCP tools (discord_*, etc.) can detect
+  // it correctly even when the home container was originally started by a
+  // different chat (e.g. web message before the Discord one arrived).
+  const currentSourceJid =
+    missedMessages[missedMessages.length - 1]?.source_jid || chatJid;
   try {
     output = await runAgent(
       effectiveGroup,
@@ -3336,6 +3343,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       },
       imagesForAgent,
       messageTaskId,
+      currentSourceJid,
     );
   } finally {
     await setTyping(chatJid, false);
@@ -3767,6 +3775,7 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
   images?: Array<{ data: string; mimeType?: string }>,
   messageTaskId?: string,
+  currentSourceJid?: string,
 ): Promise<{ status: 'success' | 'error' | 'closed'; error?: string }> {
   const isHome = !!group.is_home;
   // For the agent-runner: isMain means this is an admin home container (full privileges)
@@ -3852,6 +3861,7 @@ async function runAgent(
           turnId,
           groupFolder: group.folder,
           chatJid,
+          currentSourceJid,
           isMain: isAdminHome,
           isHome,
           isAdminHome,
@@ -3871,6 +3881,7 @@ async function runAgent(
           turnId,
           groupFolder: group.folder,
           chatJid,
+          currentSourceJid,
           isMain: isAdminHome,
           isHome,
           isAdminHome,
@@ -4208,29 +4219,23 @@ function stopStreamingBuffer(): void {
   }
 }
 
-/**
- * Check if a source group is authorized to send IPC messages to a target group.
- * - Admin home can send to any group.
- * - Non-home groups can only send to groups sharing the same folder.
- * - Member home groups can send to groups created by the same user.
- */
-export function canSendCrossGroupMessage(
+// Thin production wrapper around the pure helper in ./cross-group-acl.ts so
+// the helper can be unit-tested without booting all of index.ts.
+function canSendCrossGroupMessage(
   isAdminHome: boolean,
   isHome: boolean,
   sourceFolder: string,
   sourceGroupEntry: RegisteredGroup | undefined,
   targetGroup: RegisteredGroup | undefined,
 ): boolean {
-  if (isAdminHome) return true;
-  if (targetGroup && targetGroup.folder === sourceFolder) return true;
-  if (
-    isHome &&
-    targetGroup &&
-    sourceGroupEntry?.created_by != null &&
-    targetGroup.created_by === sourceGroupEntry.created_by
-  )
-    return true;
-  return false;
+  return canSendCrossGroupMessagePure(
+    isAdminHome,
+    isHome,
+    sourceFolder,
+    sourceGroupEntry,
+    targetGroup,
+    (jid) => registeredGroups[jid] ?? getRegisteredGroup(jid),
+  );
 }
 
 // Thin production wrapper around the pure helper in ./task-routing.ts so the
@@ -4680,13 +4685,22 @@ function startIpcWatcher(): void {
         });
 
         // 清理孤儿结果文件（容器崩溃或超时后残留，超过 10 分钟自动删除）
+        const RESULT_FILE_PREFIXES = [
+          'install_skill_result_',
+          'uninstall_skill_result_',
+          'list_tasks_result_',
+          'discord_get_history_result_',
+          'discord_get_channel_info_result_',
+          'discord_get_server_info_result_',
+        ];
+        const isResultFile = (name: string) =>
+          RESULT_FILE_PREFIXES.some((p) => name.startsWith(p));
+
         for (const entry of allEntries) {
           if (
             entry.isFile() &&
             entry.name.endsWith('.json') &&
-            (entry.name.startsWith('install_skill_result_') ||
-              entry.name.startsWith('uninstall_skill_result_') ||
-              entry.name.startsWith('list_tasks_result_'))
+            isResultFile(entry.name)
           ) {
             try {
               const filePath = path.join(tasksDir, entry.name);
@@ -4695,7 +4709,7 @@ function startIpcWatcher(): void {
                 await fsp.unlink(filePath);
                 logger.debug(
                   { sourceGroup, file: entry.name },
-                  'Cleaned up stale skill result file',
+                  'Cleaned up stale result file',
                 );
               }
             } catch {
@@ -4709,9 +4723,7 @@ function startIpcWatcher(): void {
             (entry) =>
               entry.isFile() &&
               entry.name.endsWith('.json') &&
-              !entry.name.startsWith('install_skill_result_') &&
-              !entry.name.startsWith('uninstall_skill_result_') &&
-              !entry.name.startsWith('list_tasks_result_'),
+              !isResultFile(entry.name),
           )
           .map((entry) => entry.name);
         for (const file of taskFiles) {
@@ -4828,6 +4840,9 @@ async function processTaskIpc(
     fileName?: string;
     // For list_tasks
     isAdminHome?: boolean;
+    // For discord_get_history
+    limit?: number;
+    before?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isAdminHome: boolean, // Whether source is admin home container
@@ -5093,6 +5108,18 @@ async function processTaskIpc(
           logger.error({ sourceGroup, err }, 'Failed to list tasks via IPC');
         }
       }
+      break;
+
+    case 'discord_get_history':
+    case 'discord_get_channel_info':
+    case 'discord_get_server_info':
+      await handleDiscordIpcRequest(
+        data,
+        sourceGroup,
+        sourceGroupEntry,
+        isAdminHome,
+        isHome,
+      );
       break;
 
     case 'refresh_groups':
@@ -5424,6 +5451,113 @@ async function processTaskIpc(
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
+  }
+}
+
+/**
+ * Handle Discord-specific IPC requests (history, channel info, server info).
+ * Writes a result file `{type}_result_{requestId}.json` back to the source group's tasks dir.
+ * Authorization: target chatJid must be owned by sourceGroup's user (or admin home for cross-group).
+ */
+async function handleDiscordIpcRequest(
+  data: {
+    type: string;
+    chatJid?: string;
+    requestId?: string;
+    limit?: number;
+    before?: string;
+  },
+  sourceGroup: string,
+  sourceGroupEntry: RegisteredGroup | undefined,
+  isAdminHome: boolean,
+  isHome: boolean,
+): Promise<void> {
+  const requestId = data.requestId;
+  if (!requestId || !SAFE_REQUEST_ID_RE.test(requestId)) {
+    logger.warn(
+      { sourceGroup, type: data.type, requestId },
+      'Rejected Discord IPC request with invalid requestId',
+    );
+    return;
+  }
+
+  const tasksDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'tasks');
+  const tasksDirResolved = path.resolve(tasksDir);
+  const resultFileName = `${data.type}_result_${requestId}.json`;
+  const resultFilePath = path.resolve(tasksDir, resultFileName);
+  if (!resultFilePath.startsWith(`${tasksDirResolved}${path.sep}`)) {
+    logger.warn(
+      { sourceGroup, type: data.type, resultFilePath },
+      'Rejected Discord IPC request with unsafe result file path',
+    );
+    return;
+  }
+  fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
+
+  const writeResult = (payload: object): void => {
+    const tmpPath = `${resultFilePath}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(payload));
+    fs.renameSync(tmpPath, resultFilePath);
+  };
+
+  try {
+    const chatJid = data.chatJid;
+    if (!chatJid || !chatJid.startsWith('discord:')) {
+      writeResult({
+        success: false,
+        error: 'chatJid must be a Discord JID (discord:*)',
+      });
+      return;
+    }
+
+    // Authorization: read-only Discord queries — admin home, same folder, or
+    // same owner is enough. We don't require sourceGroup to be `is_home` like
+    // cross-group sends do, because querying channel/history info doesn't
+    // write into another workspace.
+    const targetGroup = registeredGroups[chatJid];
+    const ownerOk =
+      isAdminHome ||
+      (targetGroup && targetGroup.folder === sourceGroup) ||
+      (targetGroup &&
+        sourceGroupEntry?.created_by != null &&
+        targetGroup.created_by === sourceGroupEntry.created_by);
+    if (!targetGroup || !ownerOk) {
+      writeResult({
+        success: false,
+        error: `Not authorized to access Discord chat ${chatJid}`,
+      });
+      return;
+    }
+
+    if (data.type === 'discord_get_history') {
+      const messages = await imManager.getDiscordHistory(chatJid, {
+        limit: data.limit,
+        before: data.before,
+      });
+      // Strip authorId (Discord user Snowflake) before sending to agent.
+      // authorId + authorName uniquely identifies a user even after rename;
+      // letting it reach the agent risks cross-channel forwarding into 3rd-
+      // party LLM logs. Formatted output already only shows authorName.
+      const sanitized = messages.map(({ authorId: _id, ...rest }) => rest);
+      writeResult({ success: true, messages: sanitized });
+    } else if (data.type === 'discord_get_channel_info') {
+      const channel = await imManager.getDiscordChannelInfo(chatJid);
+      writeResult({ success: true, channel });
+    } else if (data.type === 'discord_get_server_info') {
+      const guild = await imManager.getDiscordGuildInfo(chatJid);
+      writeResult({ success: true, guild });
+    } else {
+      writeResult({ success: false, error: `Unknown type: ${data.type}` });
+    }
+  } catch (err) {
+    logger.error(
+      { sourceGroup, type: data.type, err },
+      'Discord IPC request failed',
+    );
+    writeResult({
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -6399,6 +6533,7 @@ async function startMessageLoop(): Promise<void> {
               // IPC write succeeded — update reply route for the running agent
               activeRouteUpdaters.get(group.folder)?.(lastSourceJidForRoute);
             },
+            lastSourceJidForRoute,
           );
           if (sendResult === 'sent') {
             logger.debug(
@@ -7398,12 +7533,15 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
       const images = collectMessageImages(virtualChatJid, missedMessages);
       const imagesForAgent = images.length > 0 ? images : undefined;
 
+      const lastAgentSourceJid =
+        missedMessages[missedMessages.length - 1]?.source_jid || virtualChatJid;
       const sendResult = formatted
         ? queue.sendMessage(
             virtualChatJid,
             formatted,
             imagesForAgent,
             undefined,
+            lastAgentSourceJid,
           )
         : 'no_active';
       if (sendResult === 'no_active') {
