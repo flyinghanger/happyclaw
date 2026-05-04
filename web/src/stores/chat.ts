@@ -1201,7 +1201,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
 
       await get().loadGroups();
-      await get().loadAgents(jid);
+      await get().loadAgents(jid, { force: true });
       // 重建工作区后刷新文件列表（工作目录已被清空）
       useFileStore.getState().loadFiles(jid);
       return true;
@@ -2262,7 +2262,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         { im_jid: imJid, ...(force ? { force: true } : {}) },
       );
       // Refresh agents to get updated linked_im_groups
-      get().loadAgents(jid);
+      get().loadAgents(jid, { force: true });
       return true;
     } catch {
       return false;
@@ -2274,7 +2274,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await api.delete(
         `/api/groups/${encodeURIComponent(jid)}/agents/${agentId}/im-binding/${encodeURIComponent(imJid)}`,
       );
-      get().loadAgents(jid);
+      get().loadAgents(jid, { force: true });
       return true;
     } catch {
       return false;
