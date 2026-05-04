@@ -25,6 +25,7 @@ import { AgentTabBar } from './AgentTabBar';
 import { ImBindingDialog } from './ImBindingDialog';
 import { TopicSidebar } from './TopicSidebar';
 import { showToast } from '../../utils/toast';
+import { getWorkspaceLastAgent, setWorkspaceLastAgent } from '../../utils/workspaceLastAgent';
 import { CHANNEL_LABEL } from '../settings/channel-meta';
 
 /** Sentinel value for binding the main conversation (vs. a specific agent) */
@@ -123,7 +124,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       else next.delete('agent');
       return next;
     }, { replace: true });
-  }, [setSearchParams]);
+    setWorkspaceLastAgent(groupJid, id);
+  }, [groupJid, setSearchParams]);
   const loadAgents = useChatStore(s => s.loadAgents);
   const deleteAgentAction = useChatStore(s => s.deleteAgentAction);
   const agentStreaming = useChatStore(s => s.agentStreaming);
@@ -292,17 +294,44 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   }, [urlAgentId, groupJid, setActiveAgentTab]);
 
   // If URL points to an agent that no longer exists in this workspace
-  // (e.g., deleted while we were on it, or stale deep link), strip the param.
+  // (e.g., deleted while we were on it, or stale deep link), strip the param
+  // and clear the workspace memory so we don't try to restore it again.
   useEffect(() => {
     if (!urlAgentId) return;
     if (agents.length === 0) return;
     if (agents.some((a) => a.id === urlAgentId)) return;
+    setWorkspaceLastAgent(groupJid, null);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       next.delete('agent');
       return next;
     }, { replace: true });
-  }, [urlAgentId, agents, setSearchParams]);
+  }, [urlAgentId, agents, groupJid, setSearchParams]);
+
+  // On entering a workspace without ?agent=, restore the last sub-tab the
+  // user was on in this workspace (per-workspace memory, persisted across
+  // PWA restarts via localStorage). Stale entries (agent deleted) get cleaned.
+  const memoryRestoredRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (memoryRestoredRef.current === groupJid) return;
+    if (urlAgentId) {
+      memoryRestoredRef.current = groupJid;
+      return;
+    }
+    if (agents.length === 0) return;
+    const remembered = getWorkspaceLastAgent(groupJid);
+    memoryRestoredRef.current = groupJid;
+    if (!remembered) return;
+    if (!agents.some((a) => a.id === remembered)) {
+      setWorkspaceLastAgent(groupJid, null);
+      return;
+    }
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set('agent', remembered);
+      return next;
+    }, { replace: true });
+  }, [groupJid, urlAgentId, agents, setSearchParams]);
 
   useEffect(() => {
     setTopicFilter('');
