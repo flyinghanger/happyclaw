@@ -33,6 +33,10 @@ import {
   createDiscordConnection,
   type DiscordConnection,
   type DiscordConnectionConfig,
+  type DiscordHistoryMessage,
+  type DiscordHistoryOpts,
+  type DiscordChannelInfo,
+  type DiscordGuildInfo,
 } from './discord.js';
 import { logger } from './logger.js';
 import type { FeishuMessageMeta } from './types.js';
@@ -758,15 +762,39 @@ export function createDingTalkChannel(
 
 // ─── Discord Adapter ────────────────────────────────────────────
 
+/**
+ * Discord-specific extensions on top of the unified IMChannel interface.
+ * Used by im-manager to route Discord-only capabilities (history, channel/guild metadata).
+ */
+export interface DiscordChannelExtensions {
+  getDiscordHistory(
+    chatId: string,
+    opts?: DiscordHistoryOpts,
+  ): Promise<DiscordHistoryMessage[]>;
+  getDiscordChannelInfo(chatId: string): Promise<DiscordChannelInfo>;
+  getDiscordGuildInfo(chatId: string): Promise<DiscordGuildInfo | null>;
+}
+
+/** Type guard: does this IMChannel expose Discord-specific extensions? */
+export function isDiscordChannel(
+  ch: IMChannel,
+): ch is IMChannel & DiscordChannelExtensions {
+  return (
+    ch.channelType === 'discord' &&
+    typeof (ch as Partial<DiscordChannelExtensions>).getDiscordHistory ===
+      'function'
+  );
+}
+
 export function createDiscordChannel(
   config: DiscordConnectionConfig,
   opts?: { streamingMode?: 'edit' | 'off' },
-): IMChannel {
+): IMChannel & DiscordChannelExtensions {
   const streamingEnabled = opts?.streamingMode === 'edit';
   let inner: DiscordConnection | null = null;
   let typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
-  const channel: IMChannel = {
+  const channel: IMChannel & DiscordChannelExtensions = {
     channelType: 'discord',
 
     async connect(opts: IMChannelConnectOpts): Promise<boolean> {
@@ -851,6 +879,27 @@ export function createDiscordChannel(
       if (!streamingEnabled) return undefined;
       if (!inner?.createStreamingSession) return undefined;
       return inner.createStreamingSession(chatId, onCardCreated);
+    },
+
+    async getDiscordHistory(chatId, historyOpts?) {
+      if (!inner) {
+        throw new Error('Discord channel not connected');
+      }
+      return inner.getChannelHistory(chatId, historyOpts);
+    },
+
+    async getDiscordChannelInfo(chatId) {
+      if (!inner) {
+        throw new Error('Discord channel not connected');
+      }
+      return inner.getChannelInfo(chatId);
+    },
+
+    async getDiscordGuildInfo(chatId) {
+      if (!inner) {
+        throw new Error('Discord channel not connected');
+      }
+      return inner.getGuildInfo(chatId);
     },
   };
   return channel;

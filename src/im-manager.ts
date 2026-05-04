@@ -16,7 +16,14 @@ import {
   createWeChatChannel,
   createDingTalkChannel,
   createDiscordChannel,
+  isDiscordChannel,
 } from './im-channel.js';
+import type {
+  DiscordHistoryMessage,
+  DiscordHistoryOpts,
+  DiscordChannelInfo,
+  DiscordGuildInfo,
+} from './discord.js';
 import { parseFeishuRouteTarget, type FeishuConnectionConfig } from './feishu.js';
 import type { TelegramConnectionConfig } from './telegram.js';
 import type { QQConnectionConfig } from './qq.js';
@@ -222,6 +229,50 @@ class IMConnectionManager {
     } else {
       throw new Error(`通道 ${channelType} 不支持发送文件`);
     }
+  }
+
+  /**
+   * Fetch recent messages from a Discord channel/DM, auto-routing via JID prefix.
+   * Throws if the JID is not a Discord channel or no Discord connection is available.
+   */
+  async getDiscordHistory(
+    jid: string,
+    opts?: DiscordHistoryOpts,
+  ): Promise<DiscordHistoryMessage[]> {
+    const ch = this.requireDiscordChannel(jid, 'getDiscordHistory');
+    return ch.getDiscordHistory(extractChatId(jid), opts);
+  }
+
+  /**
+   * Get Discord channel/DM metadata.
+   */
+  async getDiscordChannelInfo(jid: string): Promise<DiscordChannelInfo> {
+    const ch = this.requireDiscordChannel(jid, 'getDiscordChannelInfo');
+    return ch.getDiscordChannelInfo(extractChatId(jid));
+  }
+
+  /**
+   * Get Discord guild (server) metadata for the channel's parent guild.
+   * Returns null if the JID points to a DM (no guild).
+   */
+  async getDiscordGuildInfo(jid: string): Promise<DiscordGuildInfo | null> {
+    const ch = this.requireDiscordChannel(jid, 'getDiscordGuildInfo');
+    return ch.getDiscordGuildInfo(extractChatId(jid));
+  }
+
+  /**
+   * Resolve the Discord channel adapter for a given JID, asserting type and connectivity.
+   */
+  private requireDiscordChannel(jid: string, op: string) {
+    const channelType = getChannelType(jid);
+    if (channelType !== 'discord') {
+      throw new Error(`${op}: JID is not a Discord channel: ${jid}`);
+    }
+    const ch = this.findChannelForJid(jid, 'discord');
+    if (!ch || !isDiscordChannel(ch)) {
+      throw new Error(`${op}: no connected Discord channel for ${jid}`);
+    }
+    return ch;
   }
 
   /**
