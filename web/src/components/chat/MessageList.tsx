@@ -5,6 +5,7 @@ import { useAuthStore } from '../../stores/auth';
 import { MessageBubble } from './MessageBubble';
 import { StreamingDisplay } from './StreamingDisplay';
 import { EmojiAvatar } from '../common/EmojiAvatar';
+import { ErrorBoundary } from '../common';
 import { Loader2, ChevronUp, ChevronDown, AlertTriangle, Square, Code2, Zap, BookOpen, Wrench } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 
@@ -505,7 +506,9 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
                 ref={virtualizer.measureElement}
                 data-index={virtualItem.index}
               >
-                <MessageBubble message={message} showTime={showTime} thinkingContent={thinkingCache[message.id]} thinkingDurationMs={thinkingDurationCache[message.id]} isShared={isShared} />
+                <ErrorBoundary>
+                  <MessageBubble message={message} showTime={showTime} thinkingContent={thinkingCache[message.id]} thinkingDurationMs={thinkingDurationCache[message.id]} isShared={isShared} />
+                </ErrorBoundary>
               </div>
             );
           })}
