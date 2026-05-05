@@ -16,8 +16,8 @@ import {
   setRegisteredGroup,
   updateChatName,
   getAgent,
-  deleteAllSessionsForFolder,
   clearSenderAllowlist,
+  deleteSessionsByProviderId,
   VALID_ACTIVATION_MODES,
 } from '../db.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
@@ -149,12 +149,23 @@ interface ClaudeApplyResultPayload {
   success: boolean;
   stoppedCount: number;
   failedCount: number;
+  clearedSessionsCount?: number;
   error?: string;
+}
+
+interface ApplyOptions {
+  /**
+   * If set, drop only sticky session bindings that point to this provider —
+   * preserves bindings to unrelated providers. Used when a provider's
+   * protocol-level fields (anthropicBaseUrl / anthropicModel) change.
+   */
+  clearSessionsForProviderId?: string;
 }
 
 async function applyClaudeConfigToAllGroups(
   actor: string,
   metadata?: Record<string, unknown>,
+  options?: ApplyOptions,
 ): Promise<ClaudeApplyResultPayload> {
   if (!deps) {
     throw new Error('Server not initialized');
@@ -167,18 +178,24 @@ async function applyClaudeConfigToAllGroups(
   const failedCount = results.filter((r) => r.status === 'rejected').length;
   const stoppedCount = groupJids.length - failedCount;
 
-  // 清除所有 session 记录，确保配置变更后下次启动创建全新 session
-  const registeredGroups = deps.getRegisteredGroups();
-  for (const [_, group] of Object.entries(registeredGroups) as [string, RegisteredGroup][]) {
-    if (group.folder) {
-      deleteAllSessionsForFolder(group.folder);
-      delete deps.sessions[group.folder];
+  // Narrowed session cleanup: only drop sticky bindings for the provider whose
+  // protocol-level fields actually changed. Bindings to other providers stay
+  // intact so a routine update doesn't reset the entire pool. See issue #476.
+  let clearedSessionsCount: number | undefined;
+  if (options?.clearSessionsForProviderId) {
+    const { deletedCount, affectedFolders } = deleteSessionsByProviderId(
+      options.clearSessionsForProviderId,
+    );
+    clearedSessionsCount = deletedCount;
+    for (const folder of affectedFolders) {
+      delete deps.sessions[folder];
     }
   }
 
   appendClaudeConfigAudit(actor, 'apply_to_all_flows', ['queue.stopGroup'], {
     stoppedCount,
     failedCount,
+    ...(clearedSessionsCount !== undefined ? { clearedSessionsCount } : {}),
     ...(metadata || {}),
   });
 
@@ -187,6 +204,7 @@ async function applyClaudeConfigToAllGroups(
       success: false,
       stoppedCount,
       failedCount,
+      ...(clearedSessionsCount !== undefined ? { clearedSessionsCount } : {}),
       error: `${failedCount} container(s) failed to stop`,
     };
   }
@@ -195,6 +213,7 @@ async function applyClaudeConfigToAllGroups(
     success: true,
     stoppedCount,
     failedCount: 0,
+    ...(clearedSessionsCount !== undefined ? { clearedSessionsCount } : {}),
   };
 }
 
@@ -394,22 +413,43 @@ configRoutes.patch(
     const actor = (c.get('user') as AuthUser).username;
 
     try {
+      const previous = getProviders().find((p) => p.id === id);
       const updated = updateProvider(id, validation.data);
       const changedFields = Object.keys(validation.data).map(
         (k) => `${k}:updated`,
       );
+      // Protocol-level fields are the ones that, if changed, can break
+      // resumption of an existing Claude session (different model framing /
+      // different signing authority for thinking blocks). Other fields
+      // (name, weight, customEnv) only affect routing or environment and are
+      // safe to apply mid-session.
+      const protocolFieldChanged = !!(
+        previous &&
+        ((validation.data.anthropicBaseUrl !== undefined &&
+          validation.data.anthropicBaseUrl !== previous.anthropicBaseUrl) ||
+          (validation.data.anthropicModel !== undefined &&
+            validation.data.anthropicModel !== previous.anthropicModel))
+      );
       appendClaudeConfigAudit(actor, 'update_provider', [
         `id:${id}`,
         ...changedFields,
+        ...(protocolFieldChanged ? ['protocolFieldChanged'] : []),
       ]);
 
       // If this provider is enabled, apply to running containers
       let applied: ClaudeApplyResultPayload | null = null;
       if (updated.enabled) {
-        applied = await applyClaudeConfigToAllGroups(actor, {
-          trigger: 'provider_update',
-          providerId: id,
-        });
+        applied = await applyClaudeConfigToAllGroups(
+          actor,
+          {
+            trigger: 'provider_update',
+            providerId: id,
+            protocolFieldChanged,
+          },
+          protocolFieldChanged
+            ? { clearSessionsForProviderId: id }
+            : undefined,
+        );
       }
 
       return c.json({
@@ -1348,11 +1388,13 @@ configRoutes.get('/user-im/feishu', authMiddleware, (c) => {
         enabled: false,
         updatedAt: null,
         connected,
+        autoIsolateContext: false,
       });
     }
     return c.json({
       ...toPublicFeishuProviderConfig(config, 'runtime'),
       connected,
+      autoIsolateContext: config.autoIsolateContext ?? false,
     });
   } catch (err) {
     logger.error({ err }, 'Failed to load user Feishu config');
@@ -1387,11 +1429,12 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
   }
 
   const current = getUserFeishuConfig(user.id);
-  const next = {
+  const next: Record<string, unknown> = {
     appId: current?.appId || '',
     appSecret: current?.appSecret || '',
     enabled: current?.enabled ?? true,
     updatedAt: current?.updatedAt || null,
+    autoIsolateContext: current?.autoIsolateContext ?? false,
   };
   if (typeof validation.data.appId === 'string') {
     const appId = validation.data.appId.trim();
@@ -1409,13 +1452,28 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
     // First-time config with credentials should connect immediately.
     next.enabled = true;
   }
+  if (typeof validation.data.autoIsolateContext === 'boolean') {
+    next.autoIsolateContext = validation.data.autoIsolateContext;
+  }
 
   try {
     const saved = saveUserFeishuConfig(user.id, {
-      appId: next.appId,
-      appSecret: next.appSecret,
-      enabled: next.enabled,
+      appId: next.appId as string,
+      appSecret: next.appSecret as string,
+      enabled: next.enabled as boolean | undefined,
+      autoIsolateContext: next.autoIsolateContext as boolean | undefined,
     });
+
+    // Migrate existing Feishu chats when autoIsolateContext toggle changes
+    const oldAutoIsolate = current?.autoIsolateContext ?? false;
+    const newAutoIsolate = saved.autoIsolateContext ?? false;
+    if (oldAutoIsolate !== newAutoIsolate && deps?.applyAutoIsolateContext) {
+      const migrated = deps.applyAutoIsolateContext(user.id, newAutoIsolate);
+      logger.info(
+        { userId: user.id, enable: newAutoIsolate, migrated },
+        'Applied autoIsolateContext to existing Feishu chats',
+      );
+    }
 
     // Hot-reload: reconnect user's Feishu channel
     if (deps?.reloadUserIMConfig) {
@@ -1433,6 +1491,7 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
     return c.json({
       ...toPublicFeishuProviderConfig(saved, 'runtime'),
       connected,
+      autoIsolateContext: saved.autoIsolateContext ?? false,
     });
   } catch (err) {
     const message =

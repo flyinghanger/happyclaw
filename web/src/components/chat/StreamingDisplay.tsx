@@ -8,6 +8,7 @@ import { MarkdownRenderer } from './MarkdownRenderer';
 import { TodoProgressPanel } from './TodoProgressPanel';
 import { ToolActivityCard } from './ToolActivityCard';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
+import { formatThinkingDuration } from '../../utils/thinking-duration';
 
 /** Render AskUserQuestion options as a visual card (read-only). */
 function AskUserQuestionCard({ toolInput }: { toolInput: Record<string, unknown> }) {
@@ -72,22 +73,29 @@ function TaskAgentBlock({ agent, groupJid }: { agent: AgentInfo; groupJid: strin
     if (isRunning) setExpanded(true);
   }, [isRunning]);
 
-  // Local elapsed timer for tools
+  // Local elapsed timer for tools. Depend on the joined tool-id signature
+  // (membership) rather than the array reference — every tool_progress event
+  // produces a fresh array but the same members, and re-creating the interval
+  // each time would prevent it from ever ticking.
+  const activeToolIdSignature = streaming?.activeTools
+    .map((t) => t.toolUseId)
+    .join('|') ?? '';
   useEffect(() => {
-    if (!streaming?.activeTools.length) {
+    if (!activeToolIdSignature) {
       setLocalElapsed({});
       return;
     }
     const interval = setInterval(() => {
       const now = Date.now();
+      const tools = useChatStore.getState().agentStreaming[agent.id]?.activeTools ?? [];
       const next: Record<string, number> = {};
-      for (const tool of streaming.activeTools) {
+      for (const tool of tools) {
         next[tool.toolUseId] = (now - tool.startTime) / 1000;
       }
       setLocalElapsed(next);
     }, 1000);
     return () => clearInterval(interval);
-  }, [streaming?.activeTools]);
+  }, [activeToolIdSignature, agent.id]);
 
   const borderColor = isRunning ? 'border-blue-200/60 dark:border-blue-700/40' : agent.status === 'error' ? 'border-red-200/60 dark:border-red-700/40' : 'border-emerald-200/60 dark:border-emerald-700/40';
   const bgColor = isRunning ? 'bg-blue-50/40 dark:bg-blue-950/30' : agent.status === 'error' ? 'bg-red-50/40 dark:bg-red-950/30' : 'bg-emerald-50/40 dark:bg-emerald-950/30';
@@ -221,7 +229,11 @@ function StreamingContent({
               <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
             </svg>
             <span className="text-xs font-medium text-amber-700 dark:text-amber-300">
-              {streaming.isThinking ? 'Reasoning...' : 'Reasoning'}
+              {streaming.isThinking
+                ? 'Reasoning...'
+                : (streaming.thinkingDurationMs != null && streaming.thinkingDurationMs > 0
+                    ? formatThinkingDuration(streaming.thinkingDurationMs)
+                    : 'Reasoning')}
             </span>
             {streaming.isThinking && (
               <span className="flex gap-0.5 ml-0.5">
@@ -354,6 +366,8 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
   const [thinkingExpanded, setThinkingExpanded] = useState(true);
   const thinkingRef = useRef<HTMLDivElement>(null);
   const userScrolledRef = useRef(false);
+  const prevIsThinkingRef = useRef(false);
+  const userToggledThinkingRef = useRef(false);
   const [localElapsed, setLocalElapsed] = useState<Record<string, number>>({});
 
   // Auto-clear stale waiting state to prevent UI getting stuck when agent
@@ -413,33 +427,66 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
   useEffect(() => {
     setThinkingExpanded(true);
     userScrolledRef.current = false;
+    userToggledThinkingRef.current = false;
+    prevIsThinkingRef.current = false;
   }, [groupJid]);
 
   useEffect(() => {
     if (!streaming) {
       setThinkingExpanded(true);
       userScrolledRef.current = false;
+      userToggledThinkingRef.current = false;
+      prevIsThinkingRef.current = false;
     }
   }, [streaming]);
 
-  // Local elapsed time for tools
+  // Auto-collapse the reasoning block on isThinking: true → false transition
+  // so the streaming card height matches the post-streaming MessageBubble's
+  // collapsed ReasoningBlock — eliminates the layout jump described in #493.
+  // We respect an explicit user toggle: if the user manually expanded/collapsed
+  // during this turn we don't override.
   useEffect(() => {
-    if (!streaming?.activeTools.length) {
+    const isThinking = streaming?.isThinking ?? false;
+    const hasThinking = !!streaming?.thinkingText;
+    if (
+      prevIsThinkingRef.current &&
+      !isThinking &&
+      hasThinking &&
+      !userToggledThinkingRef.current
+    ) {
+      setThinkingExpanded(false);
+    }
+    prevIsThinkingRef.current = isThinking;
+  }, [streaming?.isThinking, streaming?.thinkingText]);
+
+  // Local elapsed time for tools. Depend on the joined tool-id signature
+  // (membership) rather than the array reference; tool_progress events bump
+  // the array reference every ~200ms and would otherwise reset the timer
+  // before it ever ticks.
+  const mainActiveToolIdSignature = streaming?.activeTools
+    .map((t) => t.toolUseId)
+    .join('|') ?? '';
+  useEffect(() => {
+    if (!mainActiveToolIdSignature) {
       setLocalElapsed({});
       return;
     }
 
     const interval = setInterval(() => {
       const now = Date.now();
+      const state = useChatStore.getState();
+      const tools = (agentId
+        ? state.agentStreaming[agentId]?.activeTools
+        : state.streaming[groupJid]?.activeTools) ?? [];
       const next: Record<string, number> = {};
-      for (const tool of streaming.activeTools) {
+      for (const tool of tools) {
         next[tool.toolUseId] = (now - tool.startTime) / 1000;
       }
       setLocalElapsed(next);
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [streaming?.activeTools]);
+  }, [mainActiveToolIdSignature, agentId, groupJid]);
 
   const handleThinkingScroll = () => {
     if (!thinkingRef.current) return;
@@ -539,6 +586,7 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
               thinkingExpanded={thinkingExpanded}
               setThinkingExpanded={(v) => {
                 setThinkingExpanded(v);
+                userToggledThinkingRef.current = true;
                 if (v) userScrolledRef.current = false;
               }}
               thinkingRef={thinkingRef}
@@ -598,6 +646,7 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
                 thinkingExpanded={thinkingExpanded}
                 setThinkingExpanded={(v) => {
                   setThinkingExpanded(v);
+                  userToggledThinkingRef.current = true;
                   if (v) userScrolledRef.current = false;
                 }}
                 thinkingRef={thinkingRef}

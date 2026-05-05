@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import { LONE_SURROGATE_RE } from '../container/agent-runner/src/session-history.js';
 
 const PROMPTS_DIR = path.join(
   __dirname,
@@ -60,9 +61,6 @@ describe('prompts/ files', () => {
   });
 
   test('no prompt file contains lone UTF-16 surrogates (would break Anthropic API)', () => {
-    const LONE_SURROGATE_RE =
-      /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/g;
-
     const allFiles = listMarkdownFiles(PROMPTS_DIR);
     expect(allFiles.length).toBeGreaterThan(0);
 

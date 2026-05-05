@@ -34,6 +34,14 @@ type FlatItem =
   | { type: 'error'; content: string }
   | { type: 'message'; content: Message };
 
+// Intl.DateTimeFormat construction is expensive; reuse one instance across all
+// rows so flatMessages doesn't re-pay the cost per message on every re-group.
+const DATE_LABEL_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+
 const quickPrompts = [
   { icon: Code2, title: '分析代码', desc: '帮我阅读和分析一段代码的逻辑' },
   { icon: Zap, title: '自动化脚本', desc: '编写一个自动化处理任务的脚本' },
@@ -44,6 +52,7 @@ const quickPrompts = [
 export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrigger, groupJid, isWaiting, onInterrupt, agentId, onSend }: MessageListProps) {
   const { mode: displayMode } = useDisplayMode();
   const thinkingCache = useChatStore(s => s.thinkingCache ?? {});
+  const thinkingDurationCache = useChatStore(s => s.thinkingDurationCache ?? {});
   const isShared = useChatStore(s => !!s.groups[groupJid ?? '']?.is_shared);
   // Spawn agents: selector returns stable reference (the agents array itself),
   // then useMemo filters for spawn kind. Direct .filter() in selector causes
@@ -96,11 +105,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
   // Compute flatMessages (with date headers) before virtualizer
   const flatMessages = useMemo<FlatItem[]>(() => {
     const grouped = messages.reduce((acc, msg) => {
-      const date = new Date(msg.timestamp).toLocaleDateString('zh-CN', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      });
+      const date = DATE_LABEL_FORMATTER.format(new Date(msg.timestamp));
       if (!acc[date]) acc[date] = [];
       acc[date].push(msg);
       return acc;
@@ -498,7 +503,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
                 ref={virtualizer.measureElement}
                 data-index={virtualItem.index}
               >
-                <MessageBubble message={message} showTime={showTime} thinkingContent={thinkingCache[message.id]} isShared={isShared} />
+                <MessageBubble message={message} showTime={showTime} thinkingContent={thinkingCache[message.id]} thinkingDurationMs={thinkingDurationCache[message.id]} isShared={isShared} />
               </div>
             );
           })}

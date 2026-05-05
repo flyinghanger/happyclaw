@@ -708,7 +708,12 @@ function shouldDrain(): boolean {
  * Returns messages found (with optional images), or empty array.
  */
 interface IpcDrainResult {
-  messages: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }>; taskId?: string }>;
+  messages: Array<{
+    text: string;
+    images?: Array<{ data: string; mimeType?: string }>;
+    taskId?: string;
+    sourceJid?: string;
+  }>;
 }
 
 function drainIpcInput(): IpcDrainResult {
@@ -728,6 +733,7 @@ function drainIpcInput(): IpcDrainResult {
             text: data.text,
             images: data.images,
             taskId: typeof data.taskId === 'string' ? data.taskId : undefined,
+            sourceJid: typeof data.sourceJid === 'string' ? data.sourceJid : undefined,
           });
         }
       } catch (err) {
@@ -799,7 +805,7 @@ function createIpcWatcher(onFileDetected: () => void): { close: () => void } {
  * Wait for a new IPC message or _close sentinel.
  * Returns the messages (with optional images), or null if _close.
  */
-function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: string; mimeType?: string }>; taskId?: string } | null> {
+function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: string; mimeType?: string }>; taskId?: string; sourceJid?: string } | null> {
   return new Promise((resolve) => {
     let resolved = false;
     const tryDrain = () => {
@@ -836,12 +842,19 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
         for (let i = messages.length - 1; i >= 0; i--) {
           if (messages[i].taskId) { combinedTaskId = messages[i].taskId; break; }
         }
+        // Same convention for sourceJid: per-channel MCP tools should see the
+        // chat the most recent message arrived from.
+        let combinedSourceJid: string | undefined;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].sourceJid) { combinedSourceJid = messages[i].sourceJid; break; }
+        }
         resolved = true;
         ipcWatcher?.close();
         resolve({
           text: combinedText,
           images: allImages.length > 0 ? allImages : undefined,
           taskId: combinedTaskId,
+          sourceJid: combinedSourceJid,
         });
         return;
       }
@@ -1555,11 +1568,16 @@ async function main(): Promise<void> {
   const disableMemoryLayer = process.env.HAPPYCLAW_DISABLE_MEMORY_LAYER === 'true';
 
   // Create in-process SDK MCP server (replaces the stdio subprocess)
-  // NOTE: currentTaskId is mutated in-place by the main loop below so that
-  // createMcpTools() closures observe updates via ctx reference. See the
-  // clear-before-next-turn logic at the bottom of the query loop.
+  // NOTE: chatJid and currentTaskId are mutated in-place by the main loop
+  // below so that createMcpTools() closures observe updates via ctx reference.
+  // See the per-turn updates at the bottom of the query loop.
+  //
+  // chatJid is initialized to the IM source of the message that triggered
+  // this run (when known) — falls back to the container's startup chatJid.
+  // This lets per-channel MCP tools (discord_*, etc.) see the actual incoming
+  // chat even when the home container is shared across channels.
   const mcpToolsConfig = {
-    chatJid: containerInput.chatJid,
+    chatJid: containerInput.currentSourceJid || containerInput.chatJid,
     groupFolder: containerInput.groupFolder,
     isHome,
     isAdminHome,
@@ -1610,6 +1628,12 @@ async function main(): Promise<void> {
     const pendingImages = pendingDrain.messages.flatMap((m) => m.images || []);
     if (pendingImages.length > 0) {
       promptImages = [...(promptImages || []), ...pendingImages];
+    }
+    // The latest drained message reflects the freshest incoming chat —
+    // override the startup chatJid so per-channel MCP tools see it correctly.
+    for (let i = pendingDrain.messages.length - 1; i >= 0; i--) {
+      const sj = pendingDrain.messages[i].sourceJid;
+      if (sj) { mcpToolsConfig.chatJid = sj; break; }
     }
   }
 
@@ -1791,6 +1815,8 @@ async function main(): Promise<void> {
         containerInput.turnId = generateTurnId();
         // See main-loop comment: reset task attribution for this new turn.
         mcpToolsConfig.currentTaskId = nextMessage.taskId ?? null;
+        // Update chatJid so per-channel MCP tools see the correct incoming chat.
+        if (nextMessage.sourceJid) mcpToolsConfig.chatJid = nextMessage.sourceJid;
         // Rebuild MCP server to avoid "Already connected to a transport" error
         // when the previous query was aborted mid-stream (#421).
         mcpServerConfig = buildMcpServerConfig();
@@ -1952,6 +1978,8 @@ async function main(): Promise<void> {
       // Forgetting to clear would cause regular user replies to be broadcast
       // to the task's notify channels, hijacking later conversation.
       mcpToolsConfig.currentTaskId = nextMessage.taskId ?? null;
+      // Update chatJid so per-channel MCP tools see the correct incoming chat.
+      if (nextMessage.sourceJid) mcpToolsConfig.chatJid = nextMessage.sourceJid;
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);

@@ -185,6 +185,10 @@ export interface ContainerInput {
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
+  /** Source JID of the latest message that triggered this run (e.g. `discord:123…`).
+   * Used by per-channel MCP tools (discord_*, etc.) to identify the current
+   * incoming chat. Undefined when chatJid already encodes the IM source. */
+  currentSourceJid?: string;
   /** @deprecated Use isHome + isAdminHome instead */
   isMain: boolean;
   turnId?: string;
@@ -504,6 +508,25 @@ function buildVolumeMounts(
       hostPath: userSkillsDir,
       containerPath: '/workspace/user-skills',
       readonly: true,
+    });
+  }
+
+  // Per-user feishu-cli OAuth state (token.json + config.yaml).
+  // Without this mount, every container restart loses the user's feishu OAuth
+  // authorization, forcing re-auth every IDLE_TIMEOUT (#477).
+  if (ownerId) {
+    const userFeishuCliDir = path.join(
+      DATA_DIR,
+      'config',
+      'user-cli',
+      ownerId,
+      'feishu-cli',
+    );
+    mkdirForContainer(userFeishuCliDir);
+    mounts.push({
+      hostPath: userFeishuCliDir,
+      containerPath: '/home/node/.feishu-cli',
+      readonly: false,
     });
   }
 

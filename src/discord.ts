@@ -79,6 +79,46 @@ export interface DiscordConnectOpts {
   isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
 }
 
+export interface DiscordHistoryMessage {
+  id: string;
+  authorId: string;
+  authorName: string;
+  authorBot: boolean;
+  content: string;
+  timestamp: string;
+  attachments: Array<{ name: string; url: string; size: number; contentType?: string }>;
+  replyToId?: string;
+  edited: boolean;
+}
+
+export interface DiscordChannelInfo {
+  id: string;
+  type: 'dm' | 'guild_text' | 'guild_voice' | 'guild_news' | 'guild_thread' | 'guild_other';
+  name: string;
+  topic?: string;
+  nsfw?: boolean;
+  guildId?: string;
+  parentId?: string;
+  recipientId?: string;
+  recipientName?: string;
+}
+
+export interface DiscordGuildInfo {
+  id: string;
+  name: string;
+  description?: string;
+  ownerId: string;
+  memberCount: number;
+  iconUrl?: string;
+  createdAt: string;
+}
+
+export interface DiscordHistoryOpts {
+  limit?: number;
+  before?: string;
+  after?: string;
+}
+
 export interface DiscordConnection {
   connect(opts: DiscordConnectOpts): Promise<boolean>;
   disconnect(): Promise<void>;
@@ -106,6 +146,12 @@ export interface DiscordConnection {
     | import('./discord-streaming-edit.js').DiscordStreamingEditController
     | undefined
   >;
+  getChannelHistory(
+    chatId: string,
+    opts?: DiscordHistoryOpts,
+  ): Promise<DiscordHistoryMessage[]>;
+  getChannelInfo(chatId: string): Promise<DiscordChannelInfo>;
+  getGuildInfo(chatId: string): Promise<DiscordGuildInfo | null>;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────
@@ -905,6 +951,119 @@ export function createDiscordConnection(
           fallbackSend: (text: string) => sendMessage(chatId, text),
         },
       );
+    },
+
+    async getChannelHistory(
+      chatId: string,
+      opts: DiscordHistoryOpts = {},
+    ): Promise<DiscordHistoryMessage[]> {
+      const channel = await resolveChannel(chatId);
+      if (!channel) {
+        throw new Error(`Discord getChannelHistory: unknown chat ${chatId}`);
+      }
+
+      // Discord API caps fetch at 100 messages per request.
+      const limit = Math.max(1, Math.min(opts.limit ?? 50, 100));
+      const fetchOpts: { limit: number; before?: string; after?: string } = {
+        limit,
+      };
+      if (opts.before) fetchOpts.before = opts.before;
+      if (opts.after) fetchOpts.after = opts.after;
+
+      const collection = await channel.messages.fetch(fetchOpts);
+      // Collection is keyed by snowflake; sort newest-first → oldest-first for readability.
+      const messages = Array.from(collection.values()).sort((a, b) =>
+        a.createdTimestamp - b.createdTimestamp,
+      );
+
+      return messages.map((m) => ({
+        id: m.id,
+        authorId: m.author.id,
+        authorName: m.author.username,
+        authorBot: m.author.bot,
+        content: m.content,
+        timestamp: m.createdAt.toISOString(),
+        attachments: Array.from(m.attachments.values()).map((a) => ({
+          name: a.name ?? 'attachment',
+          url: a.url,
+          size: a.size,
+          contentType: a.contentType ?? undefined,
+        })),
+        replyToId: m.reference?.messageId ?? undefined,
+        edited: m.editedTimestamp !== null,
+      }));
+    },
+
+    async getChannelInfo(chatId: string): Promise<DiscordChannelInfo> {
+      const channel = await resolveChannel(chatId);
+      if (!channel) {
+        throw new Error(`Discord getChannelInfo: unknown chat ${chatId}`);
+      }
+
+      // DM
+      if (channel.type === ChannelType.DM) {
+        const dm = channel as DMChannel;
+        return {
+          id: dm.id,
+          type: 'dm',
+          name: dm.recipient?.username
+            ? `DM: ${dm.recipient.username}`
+            : `DM: ${dm.recipientId ?? 'unknown'}`,
+          recipientId: dm.recipientId ?? undefined,
+          recipientName: dm.recipient?.username,
+        };
+      }
+
+      // Map ChannelType numeric enum to our friendlier labels.
+      const channelTypeNumber = channel.type as number;
+      let typeLabel: DiscordChannelInfo['type'] = 'guild_other';
+      if (channelTypeNumber === ChannelType.GuildText) typeLabel = 'guild_text';
+      else if (channelTypeNumber === ChannelType.GuildAnnouncement)
+        typeLabel = 'guild_news';
+      else if (channelTypeNumber === ChannelType.GuildVoice)
+        typeLabel = 'guild_voice';
+      else if (
+        channelTypeNumber === ChannelType.PublicThread ||
+        channelTypeNumber === ChannelType.PrivateThread ||
+        channelTypeNumber === ChannelType.AnnouncementThread
+      )
+        typeLabel = 'guild_thread';
+
+      const guildChannel = channel as TextChannel | NewsChannel;
+      return {
+        id: guildChannel.id,
+        type: typeLabel,
+        name: guildChannel.name,
+        topic: 'topic' in guildChannel ? guildChannel.topic ?? undefined : undefined,
+        nsfw: 'nsfw' in guildChannel ? guildChannel.nsfw : undefined,
+        guildId: guildChannel.guildId,
+        parentId: guildChannel.parentId ?? undefined,
+      };
+    },
+
+    async getGuildInfo(chatId: string): Promise<DiscordGuildInfo | null> {
+      const channel = await resolveChannel(chatId);
+      if (!channel) {
+        throw new Error(`Discord getGuildInfo: unknown chat ${chatId}`);
+      }
+
+      // DMs do not belong to a guild
+      if (channel.type === ChannelType.DM) return null;
+
+      const guild = (channel as TextChannel | NewsChannel).guild;
+      if (!guild) return null;
+
+      // Refresh guild data to get current memberCount where possible
+      const fresh = await guild.fetch();
+      return {
+        id: fresh.id,
+        name: fresh.name,
+        description: fresh.description ?? undefined,
+        ownerId: fresh.ownerId,
+        memberCount: fresh.memberCount,
+        iconUrl: fresh.iconURL({ size: 256 }) ?? undefined,
+        createdAt: fresh.createdAt.toISOString(),
+      };
     },
   };
 

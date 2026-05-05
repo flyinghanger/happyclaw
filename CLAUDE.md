@@ -208,9 +208,15 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 | IPC 通道 `data/ipc/{folder}/` | `/workspace/ipc` | 读写 | 读写（仅自己） |
 | 项目级 Skills `container/skills/` | `/workspace/project-skills` | 只读 | 只读 |
 | 用户级 Skills `~/.claude/skills/` | `/workspace/user-skills` | 只读 | admin 创建的会话可读 |
+| feishu-cli OAuth 状态 `data/config/user-cli/{userId}/feishu-cli/` | `/home/node/.feishu-cli` | 读写 | 读写（仅自己） |
 | 环境变量 `data/env/{folder}/env` | `/workspace/env-dir/env` | 只读 | 只读 |
 | 持久 extra 目录 `data/extra/{folder}/` | `/workspace/extra` | 读写 | 读写（仅自己） |
 | 额外挂载（白名单内） | `/workspace/extra/{name}` | 按白名单 | 按白名单（`nonMainReadOnly` 时强制只读） |
+| 持久化 npm 全局包 `data/extra/{folder}/.npm-global/` | `/workspace/extra/.npm-global` | 读写 | 读写（仅自己） |
+
+> **npm 全局包持久化**：容器内 npm prefix 由 entrypoint.sh 指向 `/workspace/extra/.npm-global/`，PATH 也包含该目录的 `bin/`。Agent 在容器内执行 `npm install -g <pkg>`（如 `lark-cli`、`@fanfanv5/feishu-cli`、各类 npx 风格的 MCP server 包）会自动持久化到 host 端 `data/extra/{folder}/.npm-global/`，下次新容器启动直接可用，不会因 `docker run --rm` 销毁而丢失。Per-user 隔离（每个 home folder 有独立 extra 目录）。注意：跨 CPU 架构迁移时（如 ARM64 ↔ x86_64）带 native module 的包会失效，纯 JS 包不影响。
+>
+> 注意：本机制依赖 `container/entrypoint.sh`，更新后需通过 `./container/build.sh` 重建镜像才能生效。
 
 ### 3.5 配置优先级
 
@@ -366,6 +372,7 @@ data/
   config/user-im/{userId}/telegram.json    # 用户级 Telegram IM 配置（AES-256-GCM 加密）
   config/user-im/{userId}/qq.json          # 用户级 QQ IM 配置（AES-256-GCM 加密）
   config/user-im/{userId}/dingtalk.json   # 用户级钉钉 IM 配置（AES-256-GCM 加密）
+  config/user-cli/{userId}/feishu-cli/     # 用户级 feishu-cli OAuth 状态（token.json + config.yaml，bind-mount 到容器 /home/node/.feishu-cli）
   config/registration.json                 # 注册设置（开关、邀请码要求）
   config/session-secret.key                # 会话签名密钥（0600 权限）
   config/system-settings.json              # 系统运行参数（容器超时、并发限制等）

@@ -4,6 +4,7 @@ import { wsManager } from '../api/ws';
 import { useFileStore } from './files';
 import { useAuthStore } from './auth';
 import { showToast, notifyIfHidden, shouldEmitBackgroundTaskNotice, showNotificationPromptToast } from '../utils/toast';
+import { invalidateGroupCache } from '../utils/pwaCache';
 import type { GroupInfo, AgentInfo, AvailableImGroup } from '../types';
 
 export type { GroupInfo, AgentInfo };
@@ -64,6 +65,10 @@ export interface StreamingState {
   partialText: string;
   thinkingText: string;
   isThinking: boolean;
+  /** Wall-clock ms of the first thinking_delta in the current thinking burst. */
+  thinkingStartedAt?: number;
+  /** Captured at the transition isThinking: true → false. Used to render "已思考 Xs". */
+  thinkingDurationMs?: number;
   activeTools: Array<{
     toolName: string;
     toolUseId: string;
@@ -123,29 +128,46 @@ function mergeMessagesChronologically(
 const MAX_THINKING_CACHE_SIZE = 500;
 
 /** Evict oldest entries when cache exceeds capacity (relies on insertion order) */
-function capThinkingCache(cache: Record<string, string>): Record<string, string> {
+function capThinkingCache<V>(cache: Record<string, V>): Record<string, V> {
   const keys = Object.keys(cache);
   if (keys.length <= MAX_THINKING_CACHE_SIZE) return cache;
   const keep = keys.slice(keys.length - MAX_THINKING_CACHE_SIZE);
-  const next: Record<string, string> = {};
+  const next: Record<string, V> = {};
   for (const k of keep) next[k] = cache[k];
   return next;
 }
 
-function retainThinkingCacheForMessages(
+function retainThinkingCacheForMessages<V>(
   messagesByGroup: Record<string, Message[]>,
-  cache: Record<string, string>,
-): Record<string, string> {
+  cache: Record<string, V>,
+): Record<string, V> {
   const aliveMessageIds = new Set<string>();
   for (const messages of Object.values(messagesByGroup)) {
     for (const m of messages) aliveMessageIds.add(m.id);
   }
 
-  const next: Record<string, string> = {};
+  const next: Record<string, V> = {};
   for (const [messageId, content] of Object.entries(cache)) {
     if (aliveMessageIds.has(messageId)) next[messageId] = content;
   }
   return capThinkingCache(next);
+}
+
+/** Record the moment thinking starts; resets on transition non-thinking → thinking. */
+function markThinkingStarted(prev: StreamingState, next: StreamingState): void {
+  if (!prev.isThinking) {
+    next.thinkingStartedAt = Date.now();
+    next.thinkingDurationMs = undefined;
+  } else if (prev.thinkingStartedAt == null) {
+    next.thinkingStartedAt = Date.now();
+  }
+}
+
+/** Record the elapsed thinking duration on the transition isThinking:true → false. */
+function markThinkingEnded(prev: StreamingState, next: StreamingState): void {
+  if (prev.isThinking && prev.thinkingStartedAt != null && next.thinkingDurationMs == null) {
+    next.thinkingDurationMs = Date.now() - prev.thinkingStartedAt;
+  }
 }
 
 interface ChatState {
@@ -158,7 +180,10 @@ interface ChatState {
   error: string | null;
   streaming: Record<string, StreamingState>;
   thinkingCache: Record<string, string>;
+  /** Per-message-id duration in ms; rendered as "已思考 Xs" inside ReasoningBlock. */
+  thinkingDurationCache: Record<string, number>;
   pendingThinking: Record<string, string>;
+  pendingThinkingDuration: Record<string, number>;
   /** Per-group lock: true while clearHistory is in-flight, prevents race re-injection */
   clearing: Record<string, boolean>;
   // Sub-agent state
@@ -204,7 +229,7 @@ interface ChatState {
   restoreActiveState: () => Promise<void>;
   handleStreamSnapshot: (chatJid: string, snapshot: StreamSnapshotData, agentId?: string) => void;
   // Sub-agent actions
-  loadAgents: (jid: string) => Promise<void>;
+  loadAgents: (jid: string, opts?: { force?: boolean }) => Promise<void>;
   deleteAgentAction: (jid: string, agentId: string) => Promise<boolean>;
   setActiveAgentTab: (jid: string, agentId: string | null) => void;
   // Conversation agent actions
@@ -266,6 +291,12 @@ function freezeStreamingState(state: StreamingState | undefined): StreamingState
     state.recentEvents.length > 0 ||
     (state.todos && state.todos.length > 0);
   if (!hasData) return null;
+  // Preserve any in-flight thinking duration so the interrupted card still shows "已思考 Xs".
+  const thinkingDurationMs = state.thinkingDurationMs ?? (
+    state.isThinking && state.thinkingStartedAt != null
+      ? Date.now() - state.thinkingStartedAt
+      : undefined
+  );
   return {
     ...state,
     isThinking: false,
@@ -273,6 +304,7 @@ function freezeStreamingState(state: StreamingState | undefined): StreamingState
     activeHook: null,
     systemStatus: null,
     interrupted: true,
+    thinkingDurationMs,
   };
 }
 
@@ -406,11 +438,13 @@ function flushPendingDelta(
         const combined = prev.partialText + mergedText;
         next.partialText = combined.length > MAX_STREAMING_TEXT ? combined.slice(-MAX_STREAMING_TEXT) : combined;
         next.isThinking = false;
+        markThinkingEnded(prev, next);
       }
       if (mergedThinking) {
         const combined = prev.thinkingText + mergedThinking;
         next.thinkingText = combined.length > MAX_STREAMING_TEXT ? combined.slice(-MAX_STREAMING_TEXT) : combined;
         next.isThinking = true;
+        markThinkingStarted(prev, next);
       }
       return { agentStreaming: { ...s.agentStreaming, [agentId]: next } };
     });
@@ -424,11 +458,13 @@ function flushPendingDelta(
         const combined = prev.partialText + mergedText;
         next.partialText = combined.length > MAX_STREAMING_TEXT ? combined.slice(-MAX_STREAMING_TEXT) : combined;
         next.isThinking = false;
+        markThinkingEnded(prev, next);
       }
       if (mergedThinking) {
         const combined = prev.thinkingText + mergedThinking;
         next.thinkingText = combined.length > MAX_STREAMING_TEXT ? combined.slice(-MAX_STREAMING_TEXT) : combined;
         next.isThinking = true;
+        markThinkingStarted(prev, next);
       }
       saveStreamingToSession(chatJid, next);
       return {
@@ -636,16 +672,19 @@ function applyStreamEvent(
       const combined = prev.partialText + (event.text || '');
       next.partialText = combined.length > maxText ? combined.slice(-maxText) : combined;
       next.isThinking = false;
+      markThinkingEnded(prev, next);
       break;
     }
     case 'thinking_delta': {
       const combined = prev.thinkingText + (event.text || '');
       next.thinkingText = combined.length > maxText ? combined.slice(-maxText) : combined;
       next.isThinking = true;
+      markThinkingStarted(prev, next);
       break;
     }
     case 'tool_use_start': {
       next.isThinking = false;
+      markThinkingEnded(prev, next);
       const toolUseId = event.toolUseId || '';
       const existing = prev.activeTools.find(t => t.toolUseId === toolUseId && toolUseId);
       const tool = {
@@ -772,7 +811,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   error: null,
   streaming: {},
   thinkingCache: {},
+  thinkingDurationCache: {},
   pendingThinking: {},
+  pendingThinkingDuration: {},
   clearing: {},
   agents: {},
   agentStreaming: {},
@@ -911,7 +952,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           // Transfer pending thinking to thinkingCache
           let nextThinkingCache = s.thinkingCache;
+          let nextThinkingDurationCache = s.thinkingDurationCache;
           let nextPendingThinking = s.pendingThinking;
+          let nextPendingThinkingDuration = s.pendingThinkingDuration;
           if (agentReplied && s.pendingThinking[jid]) {
             const lastAiMsg = [...data.messages]
               .reverse()
@@ -923,8 +966,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
               );
             if (lastAiMsg) {
               nextThinkingCache = capThinkingCache({ ...s.thinkingCache, [lastAiMsg.id]: s.pendingThinking[jid] });
+              const pendingDur = s.pendingThinkingDuration[jid];
+              if (pendingDur != null) {
+                nextThinkingDurationCache = capThinkingCache({ ...s.thinkingDurationCache, [lastAiMsg.id]: pendingDur });
+              }
               const { [jid]: _, ...restPending } = s.pendingThinking;
               nextPendingThinking = restPending;
+              const { [jid]: __, ...restPendingDur } = s.pendingThinkingDuration;
+              nextPendingThinkingDuration = restPendingDur;
             }
           }
 
@@ -937,7 +986,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ? (() => { const next = { ...s.streaming }; delete next[jid]; return next; })()
               : s.streaming,
             thinkingCache: nextThinkingCache,
+            thinkingDurationCache: nextThinkingDurationCache,
             pendingThinking: nextPendingThinking,
+            pendingThinkingDuration: nextPendingThinkingDuration,
             error: null,
           };
         });
@@ -1127,6 +1178,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         `/api/groups/${encodeURIComponent(jid)}/clear-history`,
       );
 
+      // Invalidate SW cache for this group so the next page load doesn't
+      // serve a stale messages/agents response from before the clear (#467).
+      void invalidateGroupCache(jid);
+
       set((s) => {
         // Delete the key entirely (not []==[]) so selectGroup/ChatView effect
         // will trigger loadMessages on re-entry
@@ -1183,6 +1238,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             nextMessages,
             s.thinkingCache,
           ),
+          thinkingDurationCache: retainThinkingCacheForMessages(
+            nextMessages,
+            s.thinkingDurationCache,
+          ),
           agents: nextAgents,
           agentMessages: nextAgentMessages,
           agentStreaming: nextAgentStreaming,
@@ -1196,7 +1255,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
 
       await get().loadGroups();
-      await get().loadAgents(jid);
+      await get().loadAgents(jid, { force: true });
       // 重建工作区后刷新文件列表（工作目录已被清空）
       useFileStore.getState().loadFiles(jid);
       return true;
@@ -1213,6 +1272,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   deleteMessage: async (jid: string, messageId: string) => {
     try {
       await api.delete(`/api/groups/${encodeURIComponent(jid)}/messages/${encodeURIComponent(messageId)}`);
+      // Invalidate SW cache so paginated message responses don't keep serving
+      // the deleted message for up to 24h after deletion (#467).
+      void invalidateGroupCache(jid);
       set((s) => ({
         messages: {
           ...s.messages,
@@ -1338,6 +1400,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           thinkingCache: retainThinkingCacheForMessages(
             nextMessages,
             s.thinkingCache,
+          ),
+          thinkingDurationCache: retainThinkingCacheForMessages(
+            nextMessages,
+            s.thinkingDurationCache,
           ),
           currentGroup: nextCurrent,
           error: null,
@@ -1778,10 +1844,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const thinkingText = isAgentReply
           ? (streamState?.thinkingText || s.pendingThinking[chatJid])
           : undefined;
+        const thinkingDuration = isAgentReply
+          ? (streamState?.thinkingDurationMs ?? s.pendingThinkingDuration[chatJid])
+          : undefined;
         const nextStreaming = { ...s.streaming };
         delete nextStreaming[chatJid];
         const nextPending = { ...s.pendingThinking };
         delete nextPending[chatJid];
+        const nextPendingDur = { ...s.pendingThinkingDuration };
+        delete nextPendingDur[chatJid];
 
         // 未读计数：页面隐藏或不在当前对话时增加
         const isHidden = typeof document !== 'undefined' && document.hidden;
@@ -1795,8 +1866,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           waiting: { ...s.waiting, [chatJid]: false },
           streaming: nextStreaming,
           pendingThinking: nextPending,
+          pendingThinkingDuration: nextPendingDur,
           unreadReplies: nextUnread,
           ...(thinkingText ? { thinkingCache: capThinkingCache({ ...s.thinkingCache, [msg.id]: thinkingText }) } : {}),
+          ...(thinkingDuration != null ? { thinkingDurationCache: capThinkingCache({ ...s.thinkingDurationCache, [msg.id]: thinkingDuration }) } : {}),
         };
       }
 
@@ -1952,7 +2025,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // 加载子 Agent 列表
-  loadAgents: async (jid) => {
+  loadAgents: async (jid, opts) => {
+    // Skip network call if agents are already cached.  WebSocket events
+    // (agent_status, agent created/deleted) keep the cache fresh after the
+    // first load.  Pass { force: true } to bypass (e.g. WS reconnect).
+    if (!opts?.force && get().agents[jid]) {
+      return;
+    }
     try {
       const data = await api.get<{ agents: AgentInfo[] }>(
         `/api/groups/${encodeURIComponent(jid)}/agents`,
@@ -2248,7 +2327,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         { im_jid: imJid, ...(force ? { force: true } : {}) },
       );
       // Refresh agents to get updated linked_im_groups
-      get().loadAgents(jid);
+      get().loadAgents(jid, { force: true });
       return true;
     } catch {
       return false;
@@ -2260,7 +2339,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await api.delete(
         `/api/groups/${encodeURIComponent(jid)}/agents/${agentId}/im-binding/${encodeURIComponent(imJid)}`,
       );
-      get().loadAgents(jid);
+      get().loadAgents(jid, { force: true });
       return true;
     } catch {
       return false;
@@ -2446,13 +2525,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       const next = { ...s.streaming };
       const thinkingText = next[chatJid]?.thinkingText;
+      const thinkingDur = next[chatJid]?.thinkingDurationMs;
       const preserveThinking = options?.preserveThinking !== false;
       const nextPendingThinking = { ...s.pendingThinking };
+      const nextPendingThinkingDuration = { ...s.pendingThinkingDuration };
       delete next[chatJid];
       if (preserveThinking && thinkingText) {
         nextPendingThinking[chatJid] = thinkingText;
+        if (thinkingDur != null) nextPendingThinkingDuration[chatJid] = thinkingDur;
+        else delete nextPendingThinkingDuration[chatJid];
       } else {
         delete nextPendingThinking[chatJid];
+        delete nextPendingThinkingDuration[chatJid];
       }
 
       // 收集该 chatJid 下仍在运行的 SDK Task
@@ -2484,6 +2568,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         waiting: { ...s.waiting, [chatJid]: false },
         streaming: next,
         pendingThinking: nextPendingThinking,
+        pendingThinkingDuration: nextPendingThinkingDuration,
         ...(agentStreamingChanged ? { agentStreaming: nextAgentStreaming } : {}),
       };
     });

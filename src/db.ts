@@ -2271,6 +2271,42 @@ export function deleteAllSessionsForFolder(groupFolder: string): void {
   db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
 }
 
+/**
+ * Delete all session rows bound to the given provider_id.
+ *
+ * Used when a provider's protocol-level fields (anthropicBaseUrl /
+ * anthropicModel) change: any session whose history contains thinking blocks /
+ * model-specific framing produced by this provider must restart fresh,
+ * otherwise resuming under the new config can fail with "Invalid signature in
+ * thinking block" or "model mismatch" errors. Sessions bound to *other*
+ * providers are left intact so unrelated sticky bindings survive a partial
+ * config update — see issue #476.
+ *
+ * Returns the affected `group_folder` values so callers can also evict the
+ * in-memory sessions cache and the row count for telemetry.
+ */
+export function deleteSessionsByProviderId(providerId: string): {
+  deletedCount: number;
+  affectedFolders: string[];
+} {
+  const tx = db.transaction((id: string) => {
+    const rows = db
+      .prepare(
+        'SELECT DISTINCT group_folder FROM sessions WHERE provider_id = ?',
+      )
+      .all(id) as Array<{ group_folder: string }>;
+    const affectedFolders = rows.map((r) => r.group_folder);
+    const result = db
+      .prepare('DELETE FROM sessions WHERE provider_id = ?')
+      .run(id);
+    return {
+      deletedCount: result.changes,
+      affectedFolders,
+    };
+  });
+  return tx(providerId);
+}
+
 export function getAllSessions(): Record<string, string> {
   const rows = db
     .prepare(
@@ -4065,8 +4101,8 @@ export function getUserMemberFolders(
 
 export function createAgent(agent: SubAgent): void {
   db.prepare(
-    `INSERT INTO agents (id, group_folder, chat_jid, name, prompt, status, kind, created_by, created_at, completed_at, result_summary, spawned_from_jid, source_kind, thread_id, root_message_id, title_source, last_active_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO agents (id, group_folder, chat_jid, name, prompt, status, kind, created_by, created_at, completed_at, result_summary, spawned_from_jid, source_kind, thread_id, root_message_id, title_source, last_active_at, last_im_jid)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     agent.id,
     agent.group_folder,
@@ -4085,6 +4121,7 @@ export function createAgent(agent: SubAgent): void {
     agent.root_message_id ?? null,
     agent.title_source ?? null,
     agent.last_active_at ?? null,
+    agent.last_im_jid ?? null,
   );
 }
 
@@ -4289,7 +4326,7 @@ function mapAgentRow(row: Record<string, unknown>): SubAgent {
       typeof row.spawned_from_jid === 'string' ? row.spawned_from_jid : null,
     source_kind:
       typeof row.source_kind === 'string'
-        ? (row.source_kind as 'manual' | 'feishu_thread')
+        ? (row.source_kind as 'manual' | 'feishu_thread' | 'auto_im')
         : null,
     thread_id: typeof row.thread_id === 'string' ? row.thread_id : null,
     root_message_id:

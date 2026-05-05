@@ -6,6 +6,7 @@ import { Message } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { downloadFromDataUrl } from '../../utils/download';
 import { showToast } from '../../utils/toast';
+import { isIOSDevice } from '../../utils/url';
 import {
   ShareCardRenderer,
   SHARE_CARD_DEFAULT_WIDTH,
@@ -34,20 +35,11 @@ const IOS_CANVAS_MAX_PIXELS = 14_000_000;
 const IOS_CANVAS_MAX_SIDE = 14_000;
 const MIN_EXPORT_PIXEL_RATIO = 0.6;
 
-function isIOSLike(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  const ua = navigator.userAgent || '';
-  const iOSDevice = /iPad|iPhone|iPod/.test(ua);
-  const iPadDesktopMode =
-    navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
-  return iOSDevice || iPadDesktopMode;
-}
-
 function computeExportPixelRatio(el: HTMLElement): number {
   const rect = el.getBoundingClientRect();
   const width = Math.ceil(rect.width || el.scrollWidth || SHARE_CARD_DEFAULT_WIDTH);
   const height = Math.ceil(rect.height || el.scrollHeight || 1);
-  const ios = isIOSLike();
+  const ios = isIOSDevice();
   const maxPixels = ios ? IOS_CANVAS_MAX_PIXELS : DESKTOP_CANVAS_MAX_PIXELS;
   let ratio = DEFAULT_EXPORT_PIXEL_RATIO;
 

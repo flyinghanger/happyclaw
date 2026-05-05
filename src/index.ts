@@ -70,6 +70,7 @@ import {
   updateAgentStatus,
   updateAgentLastImJid,
   updateAgentInfo,
+  deleteAgent,
   deleteCompletedAgents,
   getRunningTaskAgentsByChat,
   markRunningTaskAgentsAsError,
@@ -120,6 +121,11 @@ import {
   resolveBroadcastFolder,
   resolveTaskRoutingDecision,
 } from './task-routing.js';
+import {
+  applyAutoIsolateContextForGroups,
+  getUserContextIsolationConfig,
+} from './im-context-isolation.js';
+import { canSendCrossGroupMessage as canSendCrossGroupMessagePure } from './cross-group-acl.js';
 import { invalidateSessionCache, getWebDeps } from './web-context.js';
 import {
   getFeishuProviderConfigWithSource,
@@ -182,6 +188,7 @@ import {
   broadcastTyping,
   broadcastStreamEvent,
   broadcastAgentStatus,
+  broadcastAgentRemoved,
   broadcastTitleGenerating,
   broadcastGroupCreated,
   broadcastBillingUpdate,
@@ -560,11 +567,7 @@ function resolveImRoute(opts: {
 }): string | null {
   const { ipcAgentId, isHome, chatJid, sourceGroup } = opts;
   if (ipcAgentId) {
-    return (
-      activeImReplyRoutes.get(`${chatJid}#agent:${ipcAgentId}`) ??
-      activeImReplyRoutes.get(sourceGroup) ??
-      null
-    );
+    return activeImReplyRoutes.get(`${chatJid}#agent:${ipcAgentId}`) ?? null;
   }
   const imFromJid = getChannelType(chatJid) !== null ? chatJid : null;
   const imFromGroup = activeImReplyRoutes.get(sourceGroup) ?? null;
@@ -2578,15 +2581,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // such as emoji. Must stay byte-for-byte aligned with the matching regex
         // in container/agent-runner/src/index.ts:extractSessionHistory — both
         // sides feed the same Anthropic API and must produce identical strings.
-        const cleaned = truncated.replace(
+        let cleaned = truncated.replace(
           /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/g,
           '',
         );
+        // Defense in depth: strip the closing tag we use to fence this block
+        // so a user message containing "</system_context>" can't escape early.
+        cleaned = cleaned.replace(/<\/system_context>/gi, '</system_context_>');
         return `[${role}] ${cleaned}`;
       });
       prompt =
         '<system_context>\n' +
-        '服务刚重启，当前为新会话。以下是重启前的最近对话记录，供你了解上下文：\n\n' +
+        '检测到上次有未完成消息，当前使用新会话恢复处理。以下是恢复前的最近对话记录，供你了解上下文。\n' +
+        '重要：这些只是历史记录，可能包含不准确或过时的信息。回答当前用户消息时，请优先依据当前消息里的内容和文件；如果历史与当前问题无关，请直接忽略。\n\n' +
         historyLines.join('\n') +
         '\n</system_context>\n\n' +
         prompt;
@@ -2776,6 +2783,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     | { status: 'success' | 'error' | 'closed'; error?: string }
     | undefined;
   let activeSessionId = getSession(effectiveGroup.folder) || undefined;
+  // currentSourceJid: tells the agent-runner which IM chat the latest user
+  // message came from, so per-channel MCP tools (discord_*, etc.) can detect
+  // it correctly even when the home container was originally started by a
+  // different chat (e.g. web message before the Discord one arrived).
+  const currentSourceJid =
+    missedMessages[missedMessages.length - 1]?.source_jid || chatJid;
   try {
     output = await runAgent(
       effectiveGroup,
@@ -3330,6 +3343,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       },
       imagesForAgent,
       messageTaskId,
+      currentSourceJid,
     );
   } finally {
     await setTyping(chatJid, false);
@@ -3761,6 +3775,7 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
   images?: Array<{ data: string; mimeType?: string }>,
   messageTaskId?: string,
+  currentSourceJid?: string,
 ): Promise<{ status: 'success' | 'error' | 'closed'; error?: string }> {
   const isHome = !!group.is_home;
   // For the agent-runner: isMain means this is an admin home container (full privileges)
@@ -3846,6 +3861,7 @@ async function runAgent(
           turnId,
           groupFolder: group.folder,
           chatJid,
+          currentSourceJid,
           isMain: isAdminHome,
           isHome,
           isAdminHome,
@@ -3865,6 +3881,7 @@ async function runAgent(
           turnId,
           groupFolder: group.folder,
           chatJid,
+          currentSourceJid,
           isMain: isAdminHome,
           isHome,
           isAdminHome,
@@ -4202,29 +4219,23 @@ function stopStreamingBuffer(): void {
   }
 }
 
-/**
- * Check if a source group is authorized to send IPC messages to a target group.
- * - Admin home can send to any group.
- * - Non-home groups can only send to groups sharing the same folder.
- * - Member home groups can send to groups created by the same user.
- */
-export function canSendCrossGroupMessage(
+// Thin production wrapper around the pure helper in ./cross-group-acl.ts so
+// the helper can be unit-tested without booting all of index.ts.
+function canSendCrossGroupMessage(
   isAdminHome: boolean,
   isHome: boolean,
   sourceFolder: string,
   sourceGroupEntry: RegisteredGroup | undefined,
   targetGroup: RegisteredGroup | undefined,
 ): boolean {
-  if (isAdminHome) return true;
-  if (targetGroup && targetGroup.folder === sourceFolder) return true;
-  if (
-    isHome &&
-    targetGroup &&
-    sourceGroupEntry?.created_by != null &&
-    targetGroup.created_by === sourceGroupEntry.created_by
-  )
-    return true;
-  return false;
+  return canSendCrossGroupMessagePure(
+    isAdminHome,
+    isHome,
+    sourceFolder,
+    sourceGroupEntry,
+    targetGroup,
+    (jid) => registeredGroups[jid] ?? getRegisteredGroup(jid),
+  );
 }
 
 // Thin production wrapper around the pure helper in ./task-routing.ts so the
@@ -4674,13 +4685,22 @@ function startIpcWatcher(): void {
         });
 
         // 清理孤儿结果文件（容器崩溃或超时后残留，超过 10 分钟自动删除）
+        const RESULT_FILE_PREFIXES = [
+          'install_skill_result_',
+          'uninstall_skill_result_',
+          'list_tasks_result_',
+          'discord_get_history_result_',
+          'discord_get_channel_info_result_',
+          'discord_get_server_info_result_',
+        ];
+        const isResultFile = (name: string) =>
+          RESULT_FILE_PREFIXES.some((p) => name.startsWith(p));
+
         for (const entry of allEntries) {
           if (
             entry.isFile() &&
             entry.name.endsWith('.json') &&
-            (entry.name.startsWith('install_skill_result_') ||
-              entry.name.startsWith('uninstall_skill_result_') ||
-              entry.name.startsWith('list_tasks_result_'))
+            isResultFile(entry.name)
           ) {
             try {
               const filePath = path.join(tasksDir, entry.name);
@@ -4689,7 +4709,7 @@ function startIpcWatcher(): void {
                 await fsp.unlink(filePath);
                 logger.debug(
                   { sourceGroup, file: entry.name },
-                  'Cleaned up stale skill result file',
+                  'Cleaned up stale result file',
                 );
               }
             } catch {
@@ -4703,9 +4723,7 @@ function startIpcWatcher(): void {
             (entry) =>
               entry.isFile() &&
               entry.name.endsWith('.json') &&
-              !entry.name.startsWith('install_skill_result_') &&
-              !entry.name.startsWith('uninstall_skill_result_') &&
-              !entry.name.startsWith('list_tasks_result_'),
+              !isResultFile(entry.name),
           )
           .map((entry) => entry.name);
         for (const file of taskFiles) {
@@ -4822,6 +4840,9 @@ async function processTaskIpc(
     fileName?: string;
     // For list_tasks
     isAdminHome?: boolean;
+    // For discord_get_history
+    limit?: number;
+    before?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isAdminHome: boolean, // Whether source is admin home container
@@ -5089,6 +5110,17 @@ async function processTaskIpc(
       }
       break;
 
+    case 'discord_get_history':
+    case 'discord_get_channel_info':
+    case 'discord_get_server_info':
+      await handleDiscordIpcRequest(
+        data,
+        sourceGroup,
+        sourceGroupEntry,
+        isAdminHome,
+      );
+      break;
+
     case 'refresh_groups':
       // Only admin home group can request a refresh
       if (isAdminHome) {
@@ -5345,12 +5377,12 @@ async function processTaskIpc(
               const warnMsg = `⚠️ 文件 "${data.fileName}" 未找到（路径 "${data.filePath}" 不存在）。请引导用户确认正确的文件路径，或使用 'send_file' 时提供正确的相对路径。`;
               broadcastToWebClients(sourceGroup, warnMsg);
               // Also notify via DingTalk for conversation agents bound to IM
-              const imRoute =
-                (ipcAgentId && data.chatJid
-                  ? activeImReplyRoutes.get(
-                      `${data.chatJid}#agent:${ipcAgentId}`,
-                    )
-                  : null) ?? activeImReplyRoutes.get(sourceGroup);
+              const imRoute = resolveImRoute({
+                ipcAgentId,
+                isHome,
+                chatJid: data.chatJid,
+                sourceGroup,
+              });
               if (imRoute) {
                 try {
                   await imManager.sendMessage(imRoute, warnMsg);
@@ -5418,6 +5450,112 @@ async function processTaskIpc(
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
+  }
+}
+
+/**
+ * Handle Discord-specific IPC requests (history, channel info, server info).
+ * Writes a result file `{type}_result_{requestId}.json` back to the source group's tasks dir.
+ * Authorization: target chatJid must be owned by sourceGroup's user (or admin home for cross-group).
+ */
+async function handleDiscordIpcRequest(
+  data: {
+    type: string;
+    chatJid?: string;
+    requestId?: string;
+    limit?: number;
+    before?: string;
+  },
+  sourceGroup: string,
+  sourceGroupEntry: RegisteredGroup | undefined,
+  isAdminHome: boolean,
+): Promise<void> {
+  const requestId = data.requestId;
+  if (!requestId || !SAFE_REQUEST_ID_RE.test(requestId)) {
+    logger.warn(
+      { sourceGroup, type: data.type, requestId },
+      'Rejected Discord IPC request with invalid requestId',
+    );
+    return;
+  }
+
+  const tasksDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'tasks');
+  const tasksDirResolved = path.resolve(tasksDir);
+  const resultFileName = `${data.type}_result_${requestId}.json`;
+  const resultFilePath = path.resolve(tasksDir, resultFileName);
+  if (!resultFilePath.startsWith(`${tasksDirResolved}${path.sep}`)) {
+    logger.warn(
+      { sourceGroup, type: data.type, resultFilePath },
+      'Rejected Discord IPC request with unsafe result file path',
+    );
+    return;
+  }
+  fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
+
+  const writeResult = (payload: object): void => {
+    const tmpPath = `${resultFilePath}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(payload));
+    fs.renameSync(tmpPath, resultFilePath);
+  };
+
+  try {
+    const chatJid = data.chatJid;
+    if (!chatJid || !chatJid.startsWith('discord:')) {
+      writeResult({
+        success: false,
+        error: 'chatJid must be a Discord JID (discord:*)',
+      });
+      return;
+    }
+
+    // Authorization: read-only Discord queries — admin home, same folder, or
+    // same owner is enough. We don't require sourceGroup to be `is_home` like
+    // cross-group sends do, because querying channel/history info doesn't
+    // write into another workspace.
+    const targetGroup = registeredGroups[chatJid];
+    const ownerOk =
+      isAdminHome ||
+      (targetGroup && targetGroup.folder === sourceGroup) ||
+      (targetGroup &&
+        sourceGroupEntry?.created_by != null &&
+        targetGroup.created_by === sourceGroupEntry.created_by);
+    if (!targetGroup || !ownerOk) {
+      writeResult({
+        success: false,
+        error: `Not authorized to access Discord chat ${chatJid}`,
+      });
+      return;
+    }
+
+    if (data.type === 'discord_get_history') {
+      const messages = await imManager.getDiscordHistory(chatJid, {
+        limit: data.limit,
+        before: data.before,
+      });
+      // Strip authorId (Discord user Snowflake) before sending to agent.
+      // authorId + authorName uniquely identifies a user even after rename;
+      // letting it reach the agent risks cross-channel forwarding into 3rd-
+      // party LLM logs. Formatted output already only shows authorName.
+      const sanitized = messages.map(({ authorId: _id, ...rest }) => rest);
+      writeResult({ success: true, messages: sanitized });
+    } else if (data.type === 'discord_get_channel_info') {
+      const channel = await imManager.getDiscordChannelInfo(chatJid);
+      writeResult({ success: true, channel });
+    } else if (data.type === 'discord_get_server_info') {
+      const guild = await imManager.getDiscordGuildInfo(chatJid);
+      writeResult({ success: true, guild });
+    } else {
+      writeResult({ success: false, error: `Unknown type: ${data.type}` });
+    }
+  } catch (err) {
+    logger.error(
+      { sourceGroup, type: data.type, err },
+      'Discord IPC request failed',
+    );
+    writeResult({
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -5523,8 +5661,9 @@ async function processAgentConversation(
   // Persist the IM routing target so it survives service restarts.
   if (replySourceImJid) {
     updateAgentLastImJid(agentId, replySourceImJid);
-    // Also publish to activeImReplyRoutes so send_file/send_image IPC can route to IM.
-    activeImReplyRoutes.set(effectiveGroup.folder, replySourceImJid);
+    // Publish to activeImReplyRoutes so send_file/send_image IPC can route to IM.
+    // Only use virtualChatJid key (per-agent) — folder-level key would collide
+    // when multiple auto_im agents share the same workspace folder.
     activeImReplyRoutes.set(virtualChatJid, replySourceImJid);
   }
 
@@ -6392,6 +6531,7 @@ async function startMessageLoop(): Promise<void> {
               // IPC write succeeded — update reply route for the running agent
               activeRouteUpdaters.get(group.folder)?.(lastSourceJidForRoute);
             },
+            lastSourceJidForRoute,
           );
           if (sendResult === 'sent') {
             logger.debug(
@@ -6733,6 +6873,27 @@ function buildOnNewChat(
           setRegisteredGroup(chatJid, existing);
           registeredGroups[chatJid] = existing;
           logger.debug({ chatJid, chatName: trimmed }, 'Updated IM group name (buildOnNewChat)');
+          if (existing.target_agent_id) {
+            const agent = getAgent(existing.target_agent_id);
+            if (agent?.source_kind === 'auto_im') {
+              updateAgentContextInfo(existing.target_agent_id, { name: trimmed });
+              updateChatName(`${agent.chat_jid}#agent:${existing.target_agent_id}`, trimmed);
+            }
+          }
+        }
+        const channelType = getChannelType(chatJid);
+        const isolationConfig = getUserContextIsolationConfig(
+          userId,
+          channelType,
+          { getUserFeishuConfig },
+        );
+        if (isolationConfig.enabled) {
+          ensureAutoImConversationBinding(
+            chatJid,
+            existing,
+            userId,
+            trimmed || existing.name || chatJid,
+          );
         }
         return;
       }
@@ -6827,7 +6988,127 @@ function buildOnNewChat(
       { chatJid, chatName, userId, homeFolder },
       'Auto-registered IM chat',
     );
+
+    const channelType = getChannelType(chatJid);
+    const isolationConfig = getUserContextIsolationConfig(userId, channelType, {
+      getUserFeishuConfig,
+    });
+    if (isolationConfig.enabled) {
+      const registered = registeredGroups[chatJid]!;
+      ensureAutoImConversationBinding(chatJid, registered, userId, chatName);
+    }
   };
+}
+
+function resolveAutoImWorkspace(folder: string): { jid: string; folder: string } | null {
+  const jids = getJidsByFolder(folder);
+  for (const jid of jids) {
+    if (!jid.startsWith('web:')) continue;
+    const group = registeredGroups[jid] ?? getRegisteredGroup(jid);
+    if (group) return { jid, folder: group.folder };
+  }
+  return null;
+}
+
+function createAutoImConversationAgent(input: {
+  userId: string;
+  sourceJid: string;
+  groupFolder: string;
+  name: string;
+}): { agentId: string; workspaceJid: string; workspaceFolder: string } | null {
+  const workspace = resolveAutoImWorkspace(input.groupFolder);
+  if (!workspace) {
+    logger.warn(
+      { userId: input.userId, sourceJid: input.sourceJid, groupFolder: input.groupFolder },
+      'Cannot create auto IM conversation agent: workspace not found',
+    );
+    return null;
+  }
+
+  const agentId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const agentName = input.name || input.sourceJid;
+  createAgent({
+    id: agentId,
+    group_folder: workspace.folder,
+    chat_jid: workspace.jid,
+    name: agentName,
+    prompt: '',
+    status: 'idle',
+    kind: 'conversation',
+    created_by: input.userId,
+    created_at: now,
+    completed_at: null,
+    result_summary: null,
+    last_im_jid: input.sourceJid,
+    spawned_from_jid: null,
+    source_kind: 'auto_im',
+    last_active_at: now,
+  });
+  ensureAgentDirectories(workspace.folder, agentId);
+  const virtualChatJid = `${workspace.jid}#agent:${agentId}`;
+  ensureChatExists(virtualChatJid);
+  updateChatName(virtualChatJid, agentName);
+  updateAgentLastImJid(agentId, input.sourceJid);
+  broadcastAgentStatus(workspace.jid, agentId, 'idle', agentName, '', undefined, 'conversation');
+
+  logger.info(
+    { sourceJid: input.sourceJid, agentId, userId: input.userId },
+    'Auto-created isolated conversation agent for Feishu IM chat',
+  );
+  return { agentId, workspaceJid: workspace.jid, workspaceFolder: workspace.folder };
+}
+
+function ensureAutoImConversationBinding(
+  jid: string,
+  group: RegisteredGroup,
+  userId: string,
+  name: string,
+): boolean {
+  if (group.target_main_jid) return false;
+  if (group.target_agent_id) {
+    const existingAgent = getAgent(group.target_agent_id);
+    if (existingAgent?.source_kind === 'auto_im') {
+      ensureAgentDirectories(existingAgent.group_folder, existingAgent.id);
+      updateAgentLastImJid(existingAgent.id, jid);
+      return false;
+    }
+    return false;
+  }
+
+  const created = createAutoImConversationAgent({
+    userId,
+    sourceJid: jid,
+    groupFolder: group.folder,
+    name: name || group.name || jid,
+  });
+  if (!created) return false;
+
+  group.target_agent_id = created.agentId;
+  setRegisteredGroup(jid, group);
+  registeredGroups[jid] = group;
+  return true;
+}
+
+/**
+ * Batch-apply autoIsolateContext toggle for a user's existing Feishu IM chats.
+ * enable=true:  create conversation agents for unbound Feishu chats
+ * enable=false: remove auto_im agent bindings (manual bindings untouched)
+ */
+function applyAutoIsolateContext(userId: string, enable: boolean): number {
+  return applyAutoIsolateContextForGroups(userId, enable, {
+    groups: getAllRegisteredGroups(),
+    channelType: 'feishu',
+    getChannelType,
+    getAgent,
+    ensureBinding: ensureAutoImConversationBinding,
+    setGroup: (jid, group) => {
+      setRegisteredGroup(jid, group);
+      registeredGroups[jid] = group;
+    },
+    deleteAgent,
+    broadcastAgentRemoved,
+  });
 }
 
 /**
@@ -7109,12 +7390,18 @@ function buildResolveEffectiveChatJid(): (
 ) => { effectiveJid: string; agentId: string | null } | null {
   return (chatJid: string, messageMeta) => {
     const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
-    if (!group) return null;
+    if (!group) {
+      logger.debug({ chatJid }, 'resolveEffectiveChatJid: group not found');
+      return null;
+    }
 
     // Agent binding takes priority
     if (group.target_agent_id) {
       const agent = getAgent(group.target_agent_id);
-      if (!agent) return null;
+      if (!agent) {
+        logger.warn({ chatJid, targetAgentId: group.target_agent_id }, 'resolveEffectiveChatJid: agent not found for target_agent_id');
+        return null;
+      }
       // Use the agent's actual chat_jid (the workspace's registered JID) as the
       // base for the virtual JID.  Previously we constructed web:${folder} which
       // doesn't match any registered group for non-main workspaces (folder ≠ JID).
@@ -7162,6 +7449,10 @@ function buildResolveEffectiveChatJid(): (
       return { effectiveJid, agentId: null };
     }
 
+    logger.debug(
+      { chatJid, targetAgentId: group.target_agent_id, targetMainJid: group.target_main_jid },
+      'resolveEffectiveChatJid: no binding found',
+    );
     return null;
   };
 }
@@ -7240,12 +7531,15 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
       const images = collectMessageImages(virtualChatJid, missedMessages);
       const imagesForAgent = images.length > 0 ? images : undefined;
 
+      const lastAgentSourceJid =
+        missedMessages[missedMessages.length - 1]?.source_jid || virtualChatJid;
       const sendResult = formatted
         ? queue.sendMessage(
             virtualChatJid,
             formatted,
             imagesForAgent,
             undefined,
+            lastAgentSourceJid,
           )
         : 'no_active';
       if (sendResult === 'no_active') {
@@ -7950,6 +8244,10 @@ async function main(): Promise<void> {
           {
             ignoreMessagesBefore,
             onCommand: handleCommand,
+            resolveGroupFolder: (chatJid: string) =>
+              resolveEffectiveFolder(chatJid),
+            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+            onAgentMessage: buildOnAgentMessage(),
             onBotAddedToGroup: buildFeishuBotAddedHandler(userId, homeFolder, getReloadOwnerOpenId),
             onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
             shouldProcessGroupMessage,
@@ -8175,6 +8473,8 @@ async function main(): Promise<void> {
       activeRouteUpdaters.get(folder)?.(sourceJid);
     },
     handleSpawnCommand,
+    applyAutoIsolateContext: (userId: string, enable: boolean) =>
+      applyAutoIsolateContext(userId, enable),
   });
 
   // Clean expired sessions every hour
@@ -8473,9 +8773,14 @@ async function main(): Promise<void> {
 
   let anyFeishuConnected = false;
 
-  for (const user of allActiveUsers) {
+  // Connect each user's IM channels concurrently — startup latency was
+  // previously O(N_users) because the await was inside the for-loop. The
+  // per-user `connectUserIMChannels` already parallelizes within a user, so
+  // wrapping the outer loop in Promise.allSettled drops total cold-start to
+  // ~max(per-user latency).
+  await Promise.allSettled(allActiveUsers.map(async (user) => {
     const homeGroup = getUserHomeGroup(user.id);
-    if (!homeGroup) continue;
+    if (!homeGroup) return;
 
     // Per-user IM config takes precedence; fall back to global config for admin
     const userFeishu = getUserFeishuConfig(user.id);
@@ -8573,7 +8878,7 @@ async function main(): Promise<void> {
       !effectiveDingTalk &&
       !effectiveDiscord
     )
-      continue;
+      return;
 
     try {
       const result = await connectUserIMChannels(
@@ -8606,7 +8911,7 @@ async function main(): Promise<void> {
         'Failed to connect user IM channels',
       );
     }
-  }
+  }));
 
   // Start Feishu group sync if any connection is active
   if (anyFeishuConnected) {
@@ -8628,7 +8933,30 @@ async function main(): Promise<void> {
   }
 
   // Run health check once on startup to clean up orphaned bindings, then periodically
-  void checkImBindingsHealth();
+  void checkImBindingsHealth().then(() => {
+    // After health check, ensure auto_im agents exist for users with autoIsolateContext enabled
+    const groups = getAllRegisteredGroups();
+    const userIds = new Set<string>();
+    for (const [jid, group] of Object.entries(groups)) {
+      if (getChannelType(jid) === 'feishu' && group.created_by) {
+        userIds.add(group.created_by);
+      }
+    }
+    for (const uid of userIds) {
+      const isolationConfig = getUserContextIsolationConfig(uid, 'feishu', {
+        getUserFeishuConfig,
+      });
+      if (isolationConfig.enabled) {
+        const migrated = applyAutoIsolateContext(uid, true);
+        if (migrated > 0) {
+          logger.info(
+            { userId: uid, migrated },
+            'Startup: restored auto_im agents for user with autoIsolateContext enabled',
+          );
+        }
+      }
+    }
+  });
   const IM_BINDING_HEALTH_CHECK_INTERVAL = 30 * 60 * 1000; // 30 min
   setInterval(() => {
     void checkImBindingsHealth();
@@ -8668,6 +8996,24 @@ async function checkImBindingsHealth(): Promise<void> {
     if (group.target_agent_id) {
       const agent = getAgent(group.target_agent_id);
       if (!agent) {
+        // For auto_im agents, re-create instead of unbinding if toggle is still on
+        const userId = group.created_by;
+        const channelType = getChannelType(jid);
+        if (userId && channelType) {
+          const isolationConfig = getUserContextIsolationConfig(userId, channelType, {
+            getUserFeishuConfig,
+          });
+          if (isolationConfig.enabled) {
+            const unbound: RegisteredGroup = { ...group, target_agent_id: undefined };
+            if (ensureAutoImConversationBinding(jid, unbound, userId, group.name || jid)) {
+              logger.info(
+                { jid, userId },
+                'Health check: re-created auto_im agent (previous agent lost)',
+              );
+              continue;
+            }
+          }
+        }
         unbindImGroup(
           jid,
           `Orphaned agent binding: agent ${group.target_agent_id} no longer exists`,
