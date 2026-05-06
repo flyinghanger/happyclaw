@@ -124,6 +124,8 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
             items.push({ type: 'error', content: msg.content.slice('agent_error:'.length) });
           } else if (msg.content.startsWith('agent_max_retries:')) {
             items.push({ type: 'error', content: msg.content.slice('agent_max_retries:'.length) });
+          } else if (msg.content.startsWith('system_error:')) {
+            items.push({ type: 'error', content: msg.content.slice('system_error:'.length) });
           } else if (msg.content.startsWith('system_info:')) {
             items.push({ type: 'divider', content: msg.content.slice('system_info:'.length) });
           }

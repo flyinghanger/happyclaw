@@ -3535,6 +3535,10 @@ export interface SystemSettings {
   // 关闭 admin host 模式下 HappyClaw 自带的 memory 注入层（MCP 工具、模板 CLAUDE.md、WORKSPACE_GLOBAL/MEMORY env）
   // 启用后 admin 可以在 host 模式下完全按原生 Claude Code 的 Playbook 使用 ~/.claude/ 下的 memory/skills/rules
   disableMemoryLayerForAdminHost: boolean;
+  // Plugin catalog 自动扫描：true（默认）= 启动 5s 后扫一次 + 每小时一次；
+  // false = 关闭定时扫描，admin 仍可手点 POST /api/plugins/catalog/scan。
+  // 适用于不希望本机私有 plugin 自动入共享 catalog 的环境。
+  pluginAutoScan: boolean;
 }
 
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
@@ -3555,6 +3559,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   externalClaudeDir: '',
   autoCompactWindow: 0,
   disableMemoryLayerForAdminHost: false,
+  pluginAutoScan: true,
 };
 
 function parseIntEnv(envVar: string | undefined, fallback: number): number {
@@ -3649,6 +3654,10 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.disableMemoryLayerForAdminHost === 'boolean'
         ? raw.disableMemoryLayerForAdminHost
         : DEFAULT_SYSTEM_SETTINGS.disableMemoryLayerForAdminHost,
+    pluginAutoScan:
+      typeof raw.pluginAutoScan === 'boolean'
+        ? raw.pluginAutoScan
+        : DEFAULT_SYSTEM_SETTINGS.pluginAutoScan,
   };
 }
 
@@ -3713,6 +3722,10 @@ function buildEnvFallbackSettings(): SystemSettings {
     disableMemoryLayerForAdminHost:
       process.env.DISABLE_MEMORY_LAYER_FOR_ADMIN_HOST === 'true' ||
       DEFAULT_SYSTEM_SETTINGS.disableMemoryLayerForAdminHost,
+    pluginAutoScan:
+      process.env.PLUGIN_AUTO_SCAN === 'false'
+        ? false
+        : DEFAULT_SYSTEM_SETTINGS.pluginAutoScan,
   };
 }
 

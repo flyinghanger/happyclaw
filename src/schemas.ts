@@ -245,6 +245,7 @@ export const SystemSettingsSchema = z.object({
     )
     .optional(),
   disableMemoryLayerForAdminHost: z.boolean().optional(),
+  pluginAutoScan: z.boolean().optional(),
 });
 
 export const AppearanceConfigSchema = z.object({

@@ -549,6 +549,7 @@ function isTerminalSystemMessage(message: Pick<Message, 'sender' | 'content'>): 
   // query_interrupted 仅作为视觉分隔线，不参与流式状态清理。
   // 流式状态由 status:interrupted（冻结）→ interrupt_partial（转正）两阶段处理。
   return message.sender === '__system__' && (
+    message.content === 'context_reset' ||
     message.content.startsWith('agent_error:') ||
     message.content.startsWith('agent_max_retries:') ||
     message.content.startsWith('context_overflow:')
@@ -817,9 +818,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   clearing: {},
   agents: {},
   agentStreaming: {},
-  activeAgentTab: (() => {
-    try { return JSON.parse(sessionStorage.getItem('hc_activeAgentTabs') || '{}'); } catch { return {}; }
-  })(),
+  // Active sub-conversation tab is mirrored from URL (?agent=...) by ChatView.
+  // The store holds an in-memory copy for components that read it directly.
+  activeAgentTab: {},
   sdkTasks: {},
   sdkTaskAliases: {},
   agentMessages: {},
@@ -1010,7 +1011,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         body.attachments = attachments.map(att => ({ type: 'image', ...att }));
       }
 
-      const data = await api.post<{ success: boolean; messageId: string; timestamp: string }>('/api/messages', body);
+      type ClearedResponse = { success: true; cleared: true };
+      type MessageCreateResponse =
+        | ClearedResponse
+        | { success: true; messageId: string; timestamp: string }
+        | { success: false };
+      const isClearedResponse = (
+        d: MessageCreateResponse,
+      ): d is ClearedResponse =>
+        d.success === true && 'cleared' in d && d.cleared === true;
+
+      const data = await api.post<MessageCreateResponse>('/api/messages', body);
       if (!data.success) {
         // Server returned non-success payload — surface as a send failure so caller can retain input.
         const msg = '服务器返回失败，请重试';
@@ -1018,6 +1029,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         showToast('发送失败', msg);
         return false;
       }
+      // /clear was intercepted server-side: skip local user message merge.
+      // The context_reset divider arrives via WS new_message and triggers state cleanup.
+      if (isClearedResponse(data)) return true;
       // Add user message to local state immediately
       const authState = useAuthStore.getState();
       const sender = authState.user?.id || 'web-user';
@@ -2148,20 +2162,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  // 切换子 Agent 标签页（持久化到 sessionStorage，刷新后恢复）
+  // 切换子 Agent 标签页（在内存中 mirror，URL 是真正的真相源）
   setActiveAgentTab: (jid, agentId) => {
     set((s) => ({
       activeAgentTab: { ...s.activeAgentTab, [jid]: agentId },
     }));
-    try {
-      const stored = JSON.parse(sessionStorage.getItem('hc_activeAgentTabs') || '{}');
-      if (agentId) {
-        stored[jid] = agentId;
-      } else {
-        delete stored[jid];
-      }
-      sessionStorage.setItem('hc_activeAgentTabs', JSON.stringify(stored));
-    } catch { /* ignore */ }
   },
 
   // -- Conversation agent actions --
