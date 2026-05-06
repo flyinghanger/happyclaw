@@ -3966,7 +3966,7 @@ async function sendMessage(
       { meta: options.messageMeta },
     );
 
-    broadcastNewMessage(
+    const deliveredTo = broadcastNewMessage(
       jid,
       {
         id: persistedMsgId,
@@ -3985,7 +3985,7 @@ async function sendMessage(
       undefined,
       options.source,
     );
-    logger.info({ jid, length: text.length, sendToIM }, 'Message sent');
+    logger.info({ jid, length: text.length, sendToIM, deliveredTo }, 'Message sent');
     // Skip agent_reply broadcast for scheduled tasks to avoid clearing
     // streaming state of a concurrently running main agent.
     // Safe because scheduled tasks never trigger typing indicators, so there's
@@ -5912,7 +5912,7 @@ async function processAgentConversation(
             },
           },
         );
-        broadcastNewMessage(
+        const deliveredTo = broadcastNewMessage(
           virtualChatJid,
           {
             id: persistedMsgId,
@@ -5929,6 +5929,17 @@ async function processAgentConversation(
             finalization_reason: output.finalizationReason || 'completed',
           },
           agentId,
+        );
+        logger.info(
+          {
+            chatJid,
+            agentId,
+            msgId: persistedMsgId,
+            textLen: text.length,
+            sourceKind: output.sourceKind || 'sdk_final',
+            deliveredTo,
+          },
+          'SubAgent reply broadcast',
         );
 
         // Async LLM title upgrade after the first substantive reply.

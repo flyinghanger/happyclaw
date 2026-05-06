@@ -426,6 +426,17 @@ async function handleAgentConversationMessage(
 
   const virtualChatJid = `${chatJid}#agent:${agentId}`;
 
+  logger.info(
+    {
+      chatJid,
+      agentId,
+      contentLen: content.length,
+      agentStatus: agent.status,
+      hasAttachments: !!(attachments && attachments.length > 0),
+    },
+    'SubAgent user message received',
+  );
+
   // Store message with virtual chat_jid
   const messageId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
@@ -468,7 +479,7 @@ async function handleAgentConversationMessage(
   }
 
   // Broadcast new_message with agentId so frontend routes to agent tab
-  broadcastNewMessage(
+  const userMsgDeliveredTo = broadcastNewMessage(
     virtualChatJid,
     {
       id: messageId,
@@ -481,6 +492,10 @@ async function handleAgentConversationMessage(
       attachments: attachmentsStr,
     },
     agentId,
+  );
+  logger.info(
+    { chatJid, agentId, msgId: messageId, deliveredTo: userMsgDeliveredTo },
+    'SubAgent user message broadcast',
   );
 
   // Format for agent
@@ -507,6 +522,10 @@ async function handleAgentConversationMessage(
     agentImages,
     undefined,
     virtualChatJid,
+  );
+  logger.info(
+    { chatJid, agentId, msgId: messageId, queueResult: agentSendResult },
+    'SubAgent message routed to queue',
   );
   if (agentSendResult === 'no_active') {
     // No running process — force close any stale state and start fresh.
@@ -1186,8 +1205,9 @@ function safeBroadcast(
   msg: WsMessageOut,
   adminOnly = false,
   allowedUserIds?: Set<string> | null,
-): void {
+): number {
   const data = JSON.stringify(msg);
+  let delivered = 0;
   for (const [client, clientInfo] of wsClients) {
     if (client.readyState !== WebSocket.OPEN) {
       wsClients.delete(client);
@@ -1238,10 +1258,12 @@ function safeBroadcast(
 
     try {
       client.send(data);
+      delivered++;
     } catch {
       wsClients.delete(client);
     }
   }
+  return delivered;
 }
 
 /**
@@ -1369,7 +1391,7 @@ export function broadcastNewMessage(
   msg: NewMessage & { is_from_me?: boolean },
   agentId?: string,
   source?: string,
-): void {
+): number {
   // For virtual JIDs like "web:xxx#agent:yyy", extract base JID and agentId
   let baseChatJid = chatJid;
   let effectiveAgentId = agentId;
@@ -1387,7 +1409,36 @@ export function broadcastNewMessage(
     ...(effectiveAgentId ? { agentId: effectiveAgentId } : {}),
     ...(source ? { source } : {}),
   };
-  safeBroadcast(wsMsg, isHostGroupJid(baseChatJid), allowedUserIds);
+  const delivered = safeBroadcast(
+    wsMsg,
+    isHostGroupJid(baseChatJid),
+    allowedUserIds,
+  );
+  // Diagnostic log: every new_message broadcast leaves a trace so we can
+  // reconstruct delivery ordering when a frame is suspected to have been
+  // dropped (e.g. UI stuck on "thinking" while DB has the reply).
+  const logEntry = {
+    chatJid: jid,
+    agentId: effectiveAgentId,
+    msgId: msg.id,
+    isFromMe: msg.is_from_me ?? false,
+    sourceKind: msg.source_kind ?? null,
+    source: source ?? null,
+    wsClients: wsClients.size,
+    deliveredTo: delivered,
+    allowedUserIds:
+      allowedUserIds === null
+        ? 'null'
+        : allowedUserIds === undefined
+          ? 'all'
+          : Array.from(allowedUserIds),
+  };
+  if (delivered === 0 && wsClients.size > 0) {
+    logger.warn(logEntry, 'broadcastNewMessage delivered to 0 clients');
+  } else {
+    logger.info(logEntry, 'broadcastNewMessage');
+  }
+  return delivered;
 }
 
 export function broadcastTyping(chatJid: string, isTyping: boolean): void {
