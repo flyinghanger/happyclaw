@@ -9,7 +9,9 @@
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import fs from 'fs';
 import os from 'os';
+import path from 'path';
 import { logger } from './logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -68,6 +70,7 @@ export const AGENT_CAPABILITIES: AgentCapability[] = [
 ];
 
 async function isBinaryAvailable(binary: string): Promise<boolean> {
+  if (binary === 'claude' && resolveSdkBundledClaude()) return true;
   try {
     await execFileAsync('which', [binary], { timeout: 5_000 });
     return true;
@@ -77,11 +80,62 @@ async function isBinaryAvailable(binary: string): Promise<boolean> {
 }
 
 /**
- * Resolve the actual path of a binary using `which`.
- * This is needed because `node_modules/.bin/` may contain stubs that shadow
- * the actual working binary.
+ * Locate the platform-specific Claude CLI binary shipped inside the SDK package
+ * at `container/agent-runner/node_modules/@anthropic-ai/claude-agent-sdk-<plat>-<arch>/claude`.
+ *
+ * Prefer this over `which claude` because:
+ *   1. PATH may be polluted by third-party wrappers (e.g. cmux ships its own
+ *      `claude` wrapper that hijacks the command and outputs "Not logged in"
+ *      when run outside its own terminal session).
+ *   2. The SDK binary is the upstream Anthropic build, version-pinned with the
+ *      SDK we actually use.
+ */
+function resolveSdkBundledClaude(): string | null {
+  const platMap: Record<string, string> = {
+    darwin: 'darwin',
+    linux: 'linux',
+    win32: 'win32',
+  };
+  const archMap: Record<string, string> = {
+    arm64: 'arm64',
+    x64: 'x64',
+  };
+  const plat = platMap[process.platform];
+  const arch = archMap[process.arch];
+  if (!plat || !arch) return null;
+  const binName = process.platform === 'win32' ? 'claude.exe' : 'claude';
+  const candidate = path.join(
+    process.cwd(),
+    'container',
+    'agent-runner',
+    'node_modules',
+    '@anthropic-ai',
+    `claude-agent-sdk-${plat}-${arch}`,
+    binName,
+  );
+  try {
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the actual path of a binary.
+ *
+ * For `claude`, the SDK-bundled binary takes precedence over PATH lookup —
+ * this avoids cmux-style wrappers that shadow `claude` in PATH and break
+ * subprocess invocation.
+ *
+ * Fallback uses `which` because `node_modules/.bin/` may contain stubs that
+ * shadow the actual working binary.
  */
 async function resolveBinaryPath(binary: string): Promise<string | null> {
+  if (binary === 'claude') {
+    const bundled = resolveSdkBundledClaude();
+    if (bundled) return bundled;
+  }
   try {
     const { stdout } = await execFileAsync('which', [binary], {
       timeout: 5_000,
